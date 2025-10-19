@@ -1,11 +1,7 @@
 {
   "title": "Z2M Irrigation (Sonoff Valves)",
-  "config": {
-    "step": {
-      "user": {
-        "title": "Set up Z2M Irrigation",
-        "description": "Click Submit to add the integration."
-      }
-    }
-  }
+  "config": { "step": { "user": { "title": "Set up Z2M Irrigation", "description": "Click Submit to add the integration." } } },
+  "options": { "step": { "init": { "title": "Valves",
+      "description": "Paste one Zigbee2MQTT *base* topic per line, e.g.\\nzigbee2mqtt/Water valve 1",
+      "data": { "valves_text": "Base topics (one per line)" } } } }
 }
