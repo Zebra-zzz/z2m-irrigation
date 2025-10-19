@@ -1,8 +1,5 @@
 {
   "name": "Z2M Irrigation (Sonoff Valves)",
-  "content_in_root": true,
   "render_readme": true,
-  "homeassistant": "2024.1.0",
-  "zip_release": false,
-  "filename": "z2m_irrigation"
+  "homeassistant": "2024.1.0"
 }
