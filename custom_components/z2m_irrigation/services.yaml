@@ -1,0 +1,23 @@
+start_timed_run:
+  name: Start Timed Run
+  description: Turn on a valve for X minutes, then auto-off with a fail-safe.
+  fields:
+    base:
+      description: Zigbee2MQTT base topic (e.g. zigbee2mqtt/Water valve 3)
+      example: zigbee2mqtt/Water valve 3
+    minutes:
+      description: Minutes to run
+      example: 120
+start_litres_run:
+  name: Start Litres Run
+  description: Turn on a valve until N litres are consumed (with fail-safe).
+  fields:
+    base:
+      description: Zigbee2MQTT base topic
+      example: zigbee2mqtt/Water valve 3
+    litres:
+      description: Target litres
+      example: 600
+    failsafe_minutes:
+      description: Maximum minutes before forced OFF
+      example: 180
