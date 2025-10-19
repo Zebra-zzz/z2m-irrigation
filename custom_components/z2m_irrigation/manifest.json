@@ -1,12 +1,16 @@
 {
   "domain": "z2m_irrigation",
   "name": "Z2M Irrigation (Sonoff Valves)",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "documentation": "https://github.com/Zebra-zzz/z2m-irrigation",
   "issue_tracker": "https://github.com/Zebra-zzz/z2m-irrigation/issues",
-  "codeowners": ["@Zebra-zzz"],
+  "codeowners": [
+    "@Zebra-zzz"
+  ],
   "requirements": [],
   "config_flow": true,
-  "after_dependencies": ["mqtt"],
+  "after_dependencies": [
+    "mqtt"
+  ],
   "iot_class": "local_push"
 }

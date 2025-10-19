@@ -23,22 +23,27 @@ class ValveState:
 
     def update_from_payload(self, payload: dict):
         st = str(payload.get("state") or payload.get("valve") or "").upper()
-        if st in ("ON","OPEN","1","TRUE"): self.is_on = True
-        elif st in ("OFF","CLOSE","CLOSED","0","FALSE"): self.is_on = False
+        if st in ("ON","OPEN","1","TRUE"):
+            self.is_on = True
+        elif st in ("OFF","CLOSE","CLOSED","0","FALSE"):
+            self.is_on = False
 
         flow = payload.get("flow")
         if isinstance(flow, (int,float)):
+            # accept L/min or m3/h, guard absurd values
             self.flow_l_min = float(flow) if float(flow) < 200 else float(flow)*1000/60
 
-        # prefer m3, else litres
         found = False
         for k in ("water_consumed_m3","total_m3","meter_m3"):
             if k in payload and isinstance(payload[k], (int,float)):
-                self.total_l = float(payload[k])*1000; found=True; break
+                self.total_l = float(payload[k])*1000
+                found = True
+                break
         if not found:
             for k in ("total_l","litres_total","water_total_l","total","meter"):
                 if k in payload and isinstance(payload[k], (int,float)):
-                    self.total_l = float(payload[k]); break
+                    self.total_l = float(payload[k])
+                    break
 
         now = time.time()
         if self.is_on:
@@ -66,9 +71,7 @@ class ValveManager:
 
     async def start(self):
         await mqtt.async_subscribe(self.hass, self.disc_res, self._devices_msg)
-        # trigger retained response
         await mqtt.async_publish(self.hass, self.disc_req, "")
-        # ensure manual bases
         for b in self._manual_bases:
             await self._ensure_valve(b)
 
@@ -87,7 +90,6 @@ class ValveManager:
             except Exception:
                 data = {}
             v.update_from_payload(data)
-            # litres-run cutoff
             if v.litres_target is not None and v.session_used_l >= v.litres_target and v.is_on:
                 await mqtt.async_publish(self.hass, f"{v.base}/set", json.dumps({"state":"OFF"}))
                 v.litres_target = None
@@ -117,10 +119,14 @@ class ValveManager:
                 await self._ensure_valve(f"{self.base}/{fn}", fn)
 
     async def turn_on_for(self, base: str, minutes: int):
-        v = self.valves.get(base.strip("/")); if not v: return
+        v = self.valves.get(base.strip("/"))
+        if not v:
+            return
         await mqtt.async_publish(self.hass, f"{v.base}/set", json.dumps({"state":"ON"}))
         v.litres_target = None
-        if v.off_handle: v.off_handle.cancel(); v.off_handle=None
+        if v.off_handle:
+            v.off_handle.cancel()
+            v.off_handle = None
         loop = asyncio.get_running_loop()
         def _off():
             asyncio.create_task(mqtt.async_publish(self.hass, f"{v.base}/set", json.dumps({"state":"OFF"})))
@@ -128,18 +134,27 @@ class ValveManager:
         v.off_handle = loop.call_later(max(1, minutes*60), _off)
 
     async def turn_on_for_litres(self, base: str, litres: float, failsafe_minutes: int = 180):
-        v = self.valves.get(base.strip("/")); if not v: return
+        v = self.valves.get(base.strip("/"))
+        if not v:
+            return
         v.litres_target = max(0.0, float(litres))
         await mqtt.async_publish(self.hass, f"{v.base}/set", json.dumps({"state":"ON"}))
-        if v.off_handle: v.off_handle.cancel(); v.off_handle=None
+        if v.off_handle:
+            v.off_handle.cancel()
+            v.off_handle = None
         loop = asyncio.get_running_loop()
         def _off():
             asyncio.create_task(mqtt.async_publish(self.hass, f"{v.base}/set", json.dumps({"state":"OFF"})))
-            v.off_handle=None; v.litres_target=None
+            v.off_handle = None
+            v.litres_target = None
         v.off_handle = loop.call_later(max(60, failsafe_minutes*60), _off)
 
     async def turn_off(self, base: str):
-        v = self.valves.get(base.strip("/")); if not v: return
+        v = self.valves.get(base.strip("/"))
+        if not v:
+            return
         await mqtt.async_publish(self.hass, f"{v.base}/set", json.dumps({"state":"OFF"}))
-        if v.off_handle: v.off_handle.cancel(); v.off_handle=None
-        v.litres_target=None
+        if v.off_handle:
+            v.off_handle.cancel()
+            v.off_handle = None
+        v.litres_target = None
