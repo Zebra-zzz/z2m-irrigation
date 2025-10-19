@@ -1,10 +1,14 @@
 from __future__ import annotations
 import voluptuous as vol
 from homeassistant import config_entries
-from .const import DOMAIN, DEFAULT_NAME, OPT_MANUAL_VALVES, OPT_BASE_TOPIC
+from .const import (
+    DOMAIN, DEFAULT_NAME, DEFAULT_BASE_TOPIC,
+    CONF_BASE_TOPIC, CONF_MANUAL_BASES,
+)
 
-class Flow(config_entries.ConfigFlow, domain=DOMAIN):
+class Z2MIrrigationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
+
     async def async_step_user(self, user_input=None):
         if user_input is not None:
             await self.async_set_unique_id(DOMAIN)
@@ -13,23 +17,32 @@ class Flow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="user", data_schema=vol.Schema({}))
 
     @staticmethod
-    def async_get_options_flow(entry):
-        return Options(entry)
+    def async_get_options_flow(config_entry):
+        return Z2MOptionsFlow(config_entry)
 
-class Options(config_entries.OptionsFlow):
+class Z2MOptionsFlow(config_entries.OptionsFlow):
     def __init__(self, entry: config_entries.ConfigEntry) -> None:
         self.entry = entry
 
     async def async_step_init(self, user_input=None):
-        defaults = {
-          OPT_BASE_TOPIC: self.entry.options.get(OPT_BASE_TOPIC, "zigbee2mqtt"),
-          "manual_valves_text": "\n".join(self.entry.options.get(OPT_MANUAL_VALVES, [])),
-        }
-        schema = vol.Schema({
-          vol.Optional(OPT_BASE_TOPIC, default=defaults[OPT_BASE_TOPIC]): str,
-          vol.Optional("manual_valves_text", default=defaults["manual_valves_text"]): str,
-        })
+        return await self.async_step_basic(user_input)
+
+    async def async_step_basic(self, user_input=None):
         if user_input is not None:
-            lines = [ln.strip().rstrip("/") for ln in user_input.get("manual_valves_text","").splitlines() if ln.strip()]
-            return self.async_create_entry(title="", data={OPT_BASE_TOPIC: user_input[OPT_BASE_TOPIC], OPT_MANUAL_VALVES: lines})
-        return self.async_show_form(step_id="init", data_schema=schema)
+            base = user_input.get(CONF_BASE_TOPIC, DEFAULT_BASE_TOPIC).strip("/")
+            manual_raw = (user_input.get(CONF_MANUAL_BASES, "") or "")
+            # accept newline- or comma-separated
+            manual = [s.strip().strip("/") for s in manual_raw.replace("\r","").replace(",", "\n").splitlines() if s.strip()]
+            return self.async_create_entry(title="", data={
+                CONF_BASE_TOPIC: base or DEFAULT_BASE_TOPIC,
+                CONF_MANUAL_BASES: manual,
+            })
+        cur = self.entry.options or {}
+        base = cur.get(CONF_BASE_TOPIC, DEFAULT_BASE_TOPIC)
+        manual_list = cur.get(CONF_MANUAL_BASES, [])
+        manual_text = "\n".join(manual_list) if isinstance(manual_list, list) else str(manual_list)
+        schema = vol.Schema({
+            vol.Optional(CONF_BASE_TOPIC, default=base): str,
+            vol.Optional(CONF_MANUAL_BASES, default=manual_text): str,
+        })
+        return self.async_show_form(step_id="basic", data_schema=schema)

@@ -1,5 +1,22 @@
 {
   "title": "Z2M Irrigation (Sonoff Valves)",
-  "config": { "step": { "user": { "title": "Set up Z2M Irrigation", "description": "Press Submit. Valves are auto-discovered from Zigbee2MQTT." } } },
-  "options": { "step": { "init": { "title": "Options", "data": { "base_topic": "Base topic", "manual_valves_text": "Manual valves (one per line)" } } } }
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Z2M Irrigation",
+        "description": "Click Submit to add the integration."
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "basic": {
+        "title": "Z2M Irrigation options",
+        "data": {
+          "base_topic": "MQTT base topic (usually 'zigbee2mqtt')",
+          "manual_bases": "Manual valve topics (one per line)"
+        }
+      }
+    }
+  }
 }
