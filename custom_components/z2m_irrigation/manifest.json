@@ -1,7 +1,7 @@
 {
   "domain": "z2m_irrigation",
   "name": "Z2M Irrigation (Sonoff Valves)",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "documentation": "https://github.com/Zebra-zzz/z2m-irrigation",
   "issue_tracker": "https://github.com/Zebra-zzz/z2m-irrigation/issues",
   "codeowners": [
