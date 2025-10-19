@@ -1,0 +1,12 @@
+{
+  "domain": "z2m_irrigation",
+  "name": "Z2M Irrigation (Sonoff Valves)",
+  "codeowners": ["@your-github-username"],
+  "config_flow": true,
+  "dependencies": ["mqtt"],
+  "documentation": "https://github.com/your-username/ha-z2m-irrigation",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/your-username/ha-z2m-irrigation/issues",
+  "requirements": [],
+  "version": "0.3.0"
+}

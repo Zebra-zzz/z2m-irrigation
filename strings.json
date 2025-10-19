@@ -1,0 +1,50 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add Z2M Irrigation Valve",
+        "description": "Configure your first Zigbee2MQTT water valve",
+        "data": {
+          "valve_name": "Valve Name",
+          "valve_topic": "Zigbee2MQTT Topic",
+          "flow_unit": "Flow Unit",
+          "max_runtime": "Max Runtime (minutes)",
+          "noise_floor": "Flow Noise Floor (L/min)"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "valve_list": {
+        "title": "Manage Valves",
+        "description": "Add, edit, or remove valves",
+        "data": {
+          "action": "Action"
+        }
+      },
+      "add_valve": {
+        "title": "Add New Valve",
+        "description": "Configure a new water valve",
+        "data": {
+          "valve_name": "Valve Name",
+          "valve_topic": "Zigbee2MQTT Topic",
+          "flow_unit": "Flow Unit",
+          "max_runtime": "Max Runtime (minutes)",
+          "noise_floor": "Flow Noise Floor (L/min)"
+        }
+      },
+      "edit_valve": {
+        "title": "Edit Valve",
+        "description": "Modify valve configuration",
+        "data": {
+          "valve_name": "Valve Name",
+          "valve_topic": "Zigbee2MQTT Topic",
+          "flow_unit": "Flow Unit",
+          "max_runtime": "Max Runtime (minutes)",
+          "noise_floor": "Flow Noise Floor (L/min)"
+        }
+      }
+    }
+  }
+}
