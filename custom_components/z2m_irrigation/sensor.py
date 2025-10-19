@@ -7,6 +7,8 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from .const import DOMAIN, SIG_NEW_VALVE
 from .manager import ValveManager
 
+_ADDED: set[str] = set()
+
 class _Base(SensorEntity):
     _attr_should_poll = False
     def __init__(self, mgr: ValveManager, base: str, name: str, uid: str):
@@ -18,7 +20,7 @@ class _Base(SensorEntity):
                                             manufacturer="Sonoff", model="Zigbee Water Valve", name=v.name)
 
     async def async_added_to_hass(self):
-        self.async_on_remove(self.hass.helpers.dispatcher.async_dispatcher_connect(SIG_NEW_VALVE, self._maybe_update))
+        self.async_on_remove(async_dispatcher_connect(self.hass, SIG_NEW_VALVE, self._maybe_update))
 
     @callback
     def _maybe_update(self, base: str):
@@ -52,7 +54,7 @@ class SessionUsed(_Base):
         v = mgr.valves[base]
         super().__init__(mgr, base, f"{v.name} Session Used", f"{DOMAIN}:session:{v.uid}")
         self._attr_native_unit_of_measurement = "L"
-        self._attr_state_class = None  # not a long-term statistic
+        self._attr_state_class = None
 
     @property
     def native_value(self):
@@ -61,8 +63,10 @@ class SessionUsed(_Base):
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
     mgr: ValveManager = hass.data[DOMAIN][entry.entry_id]
     def _add(base: str):
-        v = mgr.valves[base]
+        key = f"{base}"
+        if key in _ADDED: return
+        _ADDED.add(key)
         async_add_entities([FlowLMin(mgr, base), TotalLitres(mgr, base), SessionUsed(mgr, base)])
     for base in list(mgr.valves.keys()):
         _add(base)
-    hass.helpers.dispatcher.async_dispatcher_connect(SIG_NEW_VALVE, _add)
+    async_dispatcher_connect(hass, SIG_NEW_VALVE, _add)
