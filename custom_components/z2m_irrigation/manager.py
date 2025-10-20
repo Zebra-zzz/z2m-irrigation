@@ -60,6 +60,12 @@ class ValveManager:
         self._unsubs: list[Callable[[], None]] = []
         self.history = SessionHistory(hass)
 
+    def _schedule_task(self, coro):
+        """Schedule an async task from a callback (thread-safe)."""
+        self.hass.loop.call_soon_threadsafe(
+            lambda: self.hass.async_create_task(coro)
+        )
+
     async def async_start(self) -> None:
         _LOGGER.debug("Starting ValveManager base=%s manual=%s scale=%s", self.base, self.manual_topics, self.flow_scale)
         # Subscriptions for device list (two possible topics)
@@ -160,7 +166,7 @@ class ValveManager:
                         "FAILSAFE: Volume target reached for %s: %.2f/%.2f L - forcing OFF",
                         topic, v.session_liters, v.target_liters
                     )
-                    self.hass.async_create_task(self.async_turn_off(topic))
+                    self._schedule_task(self.async_turn_off(topic))
                     v.target_liters = None  # Clear target to prevent repeated triggers
                     return
                 else:
@@ -180,7 +186,7 @@ class ValveManager:
                         "FAILSAFE: Time target reached for %s: %.2f/%.2f min - forcing OFF",
                         topic, elapsed_min, target_min
                     )
-                    self.hass.async_create_task(self.async_turn_off(topic))
+                    self._schedule_task(self.async_turn_off(topic))
                     v.session_end_ts = None  # Clear target to prevent repeated triggers
                     return
 
@@ -196,7 +202,7 @@ class ValveManager:
                     v.session_count += 1
                     # Log session start to Supabase
                     target = v.target_liters if v.target_liters else (v.session_end_ts - now) / 60.0 if v.session_end_ts else None
-                    self.hass.async_create_task(
+                    self._schedule_task(
                         self._log_session_start(v, target)
                     )
             else:
@@ -206,7 +212,7 @@ class ValveManager:
                     avg_flow = v.session_liters / session_duration if session_duration > 0 else 0
                     # Log session end to Supabase
                     if v.current_session_id:
-                        self.hass.async_create_task(
+                        self._schedule_task(
                             self.history.end_session(
                                 v.current_session_id,
                                 session_duration,
@@ -264,11 +270,7 @@ class ValveManager:
             except Exception:
                 pass
 
-        # liters target reached?
-        if v.session_active and v.target_liters is not None and v.session_liters >= v.target_liters:
-            self.hass.async_create_task(self.async_turn_off(v.topic))
-            v.target_liters = None
-            v.session_end_ts = None
+        # Failsafe volume check is handled earlier in this method
 
         # SAFE dispatcher fire
         self._dispatch_signal(sig_update(topic))

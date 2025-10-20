@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -60,9 +60,10 @@ class BaseNumber(NumberEntity):
         return self._value
 
     async def async_added_to_hass(self) -> None:
-        self._unsub = async_dispatcher_connect(
-            self.hass, self._sig, lambda: self.async_write_ha_state()
-        )
+        @callback
+        def _update():
+            self.async_write_ha_state()
+        self._unsub = async_dispatcher_connect(self.hass, self._sig, _update)
         self.async_write_ha_state()
 
     async def async_will_remove_from_hass(self) -> None:

@@ -2,6 +2,27 @@
 
 All notable changes to the Z2M Irrigation integration will be documented in this file.
 
+## [1.0.3] - 2025-10-20
+
+### 🚨 CRITICAL - Threading Fixes
+
+#### Thread Safety Violations Fixed
+- **FIXED**: All threading violations causing Home Assistant crashes
+  - Added `_schedule_task()` helper for thread-safe async task scheduling
+  - Fixed `_on_state()` MQTT callback to use `call_soon_threadsafe()`
+  - Added `@callback` decorator to all entity update callbacks
+  - Entities (sensor/switch/number) now update safely from dispatcher signals
+
+#### Failsafes Now Actually Work
+- **CONFIRMED**: Failsafes detected 12L/5L overflow and tried to stop valve
+  - Previous threading errors prevented OFF command from executing
+  - Now properly sends OFF command when targets exceeded
+  - Uses thread-safe task scheduling
+
+**Critical upgrade**: v1.0.2 had the logic but threading bugs prevented execution. v1.0.3 actually works!
+
+---
+
 ## [1.0.2] - 2025-10-20
 
 ### 🐛 Critical Fixes - Device Quirk Discovered

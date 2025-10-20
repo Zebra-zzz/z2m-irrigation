@@ -1,6 +1,7 @@
 from __future__ import annotations
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo
 from .manager import ValveManager, Valve
@@ -41,7 +42,9 @@ class BaseValveSensor(SensorEntity):
     def device_info(self) -> DeviceInfo:
         return DeviceInfo(identifiers={(DOMAIN, self.valve.topic)}, manufacturer=MANUFACTURER, model=MODEL, name=self.valve.name)
     async def async_added_to_hass(self) -> None:
-        def _cb(): self.async_write_ha_state()
+        @callback
+        def _cb():
+            self.async_write_ha_state()
         self._unsub = async_dispatcher_connect(self.hass, self._sig, _cb)
         # push an initial state so the entity shows immediately
         self.async_write_ha_state()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo
 from .manager import ValveManager, Valve
@@ -25,7 +26,9 @@ class ValveSwitch(SwitchEntity):
     def device_info(self) -> DeviceInfo:
         return DeviceInfo(identifiers={(DOMAIN, self.valve.topic)}, manufacturer=MANUFACTURER, model=MODEL, name=self.valve.name)
     async def async_added_to_hass(self) -> None:
-        def _cb(): self.async_write_ha_state()
+        @callback
+        def _cb():
+            self.async_write_ha_state()
         self._unsub = async_dispatcher_connect(self.hass, self._sig, _cb)
         self.async_write_ha_state()
     async def async_will_remove_from_hass(self) -> None:
