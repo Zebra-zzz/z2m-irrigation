@@ -41,9 +41,14 @@ class ValveManager:
         self._unsubs: list[Callable[[], None]] = []
 
     async def async_start(self) -> None:
+        # Subscribe to BOTH possible responses from Z2M
         self._unsubs.append(
             await mqtt.async_subscribe(self.hass, f"{self.base}/bridge/devices", self._on_devices)
         )
+        self._unsubs.append(
+            await mqtt.async_subscribe(self.hass, f"{self.base}/bridge/config/devices", self._on_devices)
+        )
+        # Ask Z2M to send the device list
         await mqtt.async_publish(self.hass, f"{self.base}/bridge/config/devices/get", "")
 
     async def async_stop(self) -> None:
@@ -54,10 +59,13 @@ class ValveManager:
     def _on_devices(self, msg) -> None:
         try:
             devices = json.loads(msg.payload)
+            if not isinstance(devices, list):
+                return
         except Exception:
             return
         for d in devices:
-            if d.get("definition", {}).get("model") != Z2M_MODEL:
+            model = (d.get("definition") or {}).get("model")
+            if model != Z2M_MODEL:
                 continue
             topic = d.get("friendly_name")
             if not topic or topic in self.valves:
@@ -92,12 +100,14 @@ class ValveManager:
         dt = max(0.0, now - v.last_ts)
         v.last_ts = now
 
+        # integrate while active
         if v.session_active:
             liters = (v.flow_lpm / 60.0) * dt
             v.session_liters += liters
             v.total_liters += liters
             v.total_minutes += dt / 60.0
 
+        # state change?
         if "state" in data:
             new_state = data.get("state")
             if new_state == "ON" and not v.session_active:
@@ -111,12 +121,14 @@ class ValveManager:
                     v.cancel_handle(); v.cancel_handle = None
             v.state = new_state
 
+        # flow
         if "flow" in data:
             try:
                 v.flow_lpm = float(data["flow"]) or 0.0
             except Exception:
                 v.flow_lpm = 0.0
 
+        # liters target reached?
         if v.session_active and v.target_liters is not None and v.session_liters >= v.target_liters:
             self.hass.async_create_task(self.async_turn_off(v.topic))
             v.target_liters = None

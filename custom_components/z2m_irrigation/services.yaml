@@ -4,36 +4,24 @@ start_timed:
   fields:
     valve:
       name: Valve (Zigbee2MQTT friendly name)
-      example: Water Valve 3
       required: true
-      selector:
-        text:
+      selector: {text: {}}
     minutes:
       name: Minutes
-      example: 30
       required: true
-      selector:
-        number:
-          min: 0
-          step: 1
+      selector: {number: {min: 0, step: 1}}
 start_liters:
   name: Start liters session
   description: Turn the valve on until the specified liters have flowed (based on flow readings).
   fields:
     valve:
       name: Valve (Zigbee2MQTT friendly name)
-      example: Water Valve 3
       required: true
-      selector:
-        text:
+      selector: {text: {}}
     liters:
       name: Liters
-      example: 60
       required: true
-      selector:
-        number:
-          min: 0
-          step: 0.1
+      selector: {number: {min: 0, step: 0.1}}
 reset_totals:
   name: Reset totals
   description: Reset total liters and total minutes. If valve is omitted, resets all valves.
@@ -41,5 +29,4 @@ reset_totals:
     valve:
       name: Valve (optional)
       required: false
-      selector:
-        text:
+      selector: {text: {}}

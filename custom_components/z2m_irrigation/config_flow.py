@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import voluptuous as vol
 from homeassistant import config_entries
+from homeassistant.config_entries import ConfigEntry
 
 from .const import DOMAIN, CONF_BASE_TOPIC, DEFAULT_BASE_TOPIC
 
@@ -15,11 +16,8 @@ class Z2MIrrigationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_create_entry(title="Z2M Irrigation", data={})
         return self.async_show_form(step_id="user", data_schema=vol.Schema({}))
 
-    async def async_get_options_flow(self, entry):
-        return OptionsFlowHandler(entry)
-
 class OptionsFlowHandler(config_entries.OptionsFlow):
-    def __init__(self, entry):
+    def __init__(self, entry: ConfigEntry):
         self.entry = entry
 
     async def async_step_init(self, user_input=None):
@@ -33,3 +31,6 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional(CONF_BASE_TOPIC, default=base): str,
             }),
         )
+
+async def async_get_options_flow(config_entry: ConfigEntry):
+    return OptionsFlowHandler(config_entry)
