@@ -1,19 +1,31 @@
 # 💧 Z2M Irrigation (Sonoff Valves)
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/Zebra-zzz/z2m-irrigation)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/Zebra-zzz/z2m-irrigation)
 
 Advanced Home Assistant custom integration for **Sonoff SWV** smart water valves via **Zigbee2MQTT**.
 
 ## ✨ Features
 
+### Core Features
 - 🔄 **Automatic Discovery** - Finds all Sonoff SWV valves via Zigbee2MQTT
-- ⏱️ **Timed Irrigation** - Set valves to run for specific minutes (native Zigbee control)
-- 💧 **Volume-Based Irrigation** - Run valves for specific liters (native Zigbee control)
+- ⏱️ **Timed Irrigation** - Set valves to run for specific minutes
+- 💧 **Volume-Based Irrigation** - Run valves for specific liters
 - 📊 **Real-time Monitoring** - Flow rate, session usage, and totals
-- 📈 **Session History** - Automatic logging to Home Assistant's local database
+- 📈 **Session History** - Automatic logging to Supabase database
 - 🔋 **Battery & Signal Monitoring** - Track device health
-- ⚡ **Local Control** - Commands sent directly to Zigbee device for offline operation
+- ⚡ **Local Control** - Commands sent directly to Zigbee device
+
+### NEW in v2.0: Smart Scheduling 🗓️
+- 🕐 **Time-Based Schedules** - Water at specific times (6 AM, 6 PM, etc.)
+- ⏲️ **Interval Schedules** - Water every X hours automatically
+- 📅 **Day Selection** - Choose which days to water (weekdays, weekends, etc.)
+- 🌦️ **Weather-Aware** - Skip watering based on rain, temperature, or soil moisture
+- 🎛️ **Easy Management** - Enable/disable schedules, run immediately, or delete
+- 📋 **Run History** - Track all schedule executions and skip reasons
+- 💾 **Cloud Database** - All schedules stored safely in Supabase
+
+👉 **See [SCHEDULING.md](SCHEDULING.md) for complete scheduling guide**
 
 ## 📦 Installation
 

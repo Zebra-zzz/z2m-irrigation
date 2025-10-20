@@ -2,6 +2,64 @@
 
 All notable changes to the Z2M Irrigation integration will be documented in this file.
 
+## [2.0.0] - 2025-10-20
+
+### 🎉 MAJOR RELEASE - Smart Scheduling System
+
+#### New Features: Irrigation Scheduling
+
+**Time-Based Schedules**
+- Create schedules that run at specific times (e.g., 6:00 AM, 6:00 PM)
+- Select specific days of the week or run daily
+- Set duration (minutes) or volume (liters) targets
+- Enable/disable schedules without deleting them
+
+**Interval-Based Schedules**
+- Run valves every X hours automatically
+- Perfect for frequent watering needs
+- Tracks last run time automatically
+
+**Smart Conditions (Weather-Aware)**
+- Skip if soil moisture is too high (sensor integration)
+- Skip based on temperature ranges (weather integration)
+- Skip if it rained recently (weather integration)
+- Conditions are optional - simple schedules work too!
+
+**Database Backend**
+- All schedules stored in Supabase
+- Schedule run history tracked automatically
+- View why schedules were skipped (conditions, manual, etc.)
+- Link schedule runs to irrigation sessions
+
+#### New Services
+
+- `z2m_irrigation.create_schedule` - Create new schedule
+- `z2m_irrigation.update_schedule` - Modify existing schedule
+- `z2m_irrigation.delete_schedule` - Remove schedule
+- `z2m_irrigation.enable_schedule` - Enable schedule
+- `z2m_irrigation.disable_schedule` - Disable schedule
+- `z2m_irrigation.run_schedule_now` - Trigger schedule immediately
+- `z2m_irrigation.reload_schedules` - Reload from database
+
+#### WebSocket API
+
+- `z2m_irrigation/schedules/list` - Get all schedules
+- `z2m_irrigation/schedules/get` - Get specific schedule
+- `z2m_irrigation/schedules/runs` - Get schedule run history
+
+#### Architecture Changes
+
+- New `scheduler.py` module handles all scheduling logic
+- Checks for due schedules every minute
+- Automatic next-run-time calculation
+- Priority system for overlapping schedules
+- Thread-safe execution
+
+**Breaking Changes:**
+- `hass.data[DOMAIN][entry_id]` now returns `{"manager": ..., "scheduler": ...}` instead of just the manager
+
+---
+
 ## [1.0.3] - 2025-10-20
 
 ### 🚨 CRITICAL - Threading Fixes

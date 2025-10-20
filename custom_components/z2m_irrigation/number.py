@@ -15,7 +15,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    mgr: ValveManager = hass.data[DOMAIN][entry.entry_id]
+    mgr: ValveManager = hass.data[DOMAIN][entry.entry_id]["manager"]
 
     async def _add_numbers(valve: Valve):
         await async_add_entities([
