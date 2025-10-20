@@ -8,16 +8,16 @@ from .const import DOMAIN, MANUFACTURER, MODEL, SIG_NEW_VALVE, sig_update
 
 async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
     mgr: ValveManager = hass.data[DOMAIN][entry.entry_id]
-    def _add_for(v: Valve):
-        hass.async_create_task(async_add_entities([
+    async def _add_for(v: Valve):
+        await async_add_entities([
             FlowLpm(mgr, v),
             SessionUsed(mgr, v),
             TotalLiters(mgr, v),
             TotalMinutes(mgr, v),
             SessionRemaining(mgr, v),
-        ], True))
+        ], True)
     for v in list(mgr.valves.values()):
-        _add_for(v)
+        await _add_for(v)
     entry.async_on_unload(async_dispatcher_connect(hass, SIG_NEW_VALVE, _add_for))
 
 class BaseValveSensor(SensorEntity):
