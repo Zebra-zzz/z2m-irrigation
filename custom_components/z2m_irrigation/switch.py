@@ -1,52 +1,77 @@
 from __future__ import annotations
+
+import json
+from typing import Any
+
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.components import mqtt
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+
 from .const import DOMAIN, SIG_NEW_VALVE
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
-    mgr = hass.data[DOMAIN][entry.entry_id]["manager"]
-    ents = [Z2MValveSwitch(mgr, b) for b in mgr.valves.keys()]
-    async_add_entities(ents)
-
-    def _maybe_add(base: str):
-        if base not in [e.base for e in ents]:
-            e = Z2MValveSwitch(mgr, base)
-            ents.append(e)
-            async_add_entities([e])
-
-    entry.async_on_unload(async_dispatcher_connect(hass, SIG_NEW_VALVE, _maybe_add))
+    async def _add(name: str, base_topic: str):
+        async_add_entities([Z2MValveSwitch(hass, name, base_topic)], True)
+    unsub = async_dispatcher_connect(hass, SIG_NEW_VALVE, _add)
+    entry.async_on_unload(unsub)
 
 class Z2MValveSwitch(SwitchEntity):
-    _attr_has_entity_name = True
+    _attr_should_poll = False
 
-    def __init__(self, manager, base: str):
-        self.manager = manager
-        self.base = base
-
-    @property
-    def name(self):
-        return self.state_obj.name if hasattr(self, "state_obj") else self.manager.valves[self.base].name
-
-    @property
-    def unique_id(self):
-        return f"{self.manager.valves[self.base].uid}_switch"
+    def __init__(self, hass: HomeAssistant, name: str, base_topic: str):
+        self.hass = hass
+        self._name = name
+        self._base = base_topic.strip().strip("/")
+        self._state = False
+        self._unsub = None
 
     @property
-    def is_on(self):
-        return self.manager.valves[self.base].is_on
+    def unique_id(self) -> str:
+        return f"{self._name}_switch"
 
-    async def async_turn_on(self, **kwargs):
-        await self.manager.turn_on_for(self.base, 0)
+    @property
+    def name(self) -> str:
+        return self._name
 
-    async def async_turn_off(self, **kwargs):
-        await self.manager.turn_off(self.base)
+    @property
+    def is_on(self) -> bool:
+        return self._state
 
-    async def async_added_to_hass(self):
-        self.state_obj = self.manager.valves[self.base]
-        self.async_on_remove(async_dispatcher_connect(self.hass, SIG_NEW_VALVE, self._maybe_update))
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {(DOMAIN, self._name)},
+            "manufacturer": "Sonoff",
+            "model": "SWV",
+            "name": self._name,
+        }
 
-    async def _maybe_update(self, base: str):
-        if base == self.base:
-            self.schedule_update_ha_state()
+    async def async_added_to_hass(self) -> None:
+        topic = f"{self._base}/{self._name}"
+        async def _msg(msg):
+            try:
+                data = json.loads(msg.payload)
+            except Exception:
+                return
+            st = data.get("state")
+            if isinstance(st, str):
+                self._state = (st.upper() == "ON")
+                self.async_write_ha_state()
+        self._unsub = await mqtt.async_subscribe(self.hass, topic, _msg)
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._unsub:
+            self._unsub()
+            self._unsub = None
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await mqtt.async_publish(self.hass, f"{self._base}/{self._name}/set", json.dumps({"state":"ON"}), qos=0, retain=False)
+        self._state = True
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await mqtt.async_publish(self.hass, f"{self._base}/{self._name}/set", json.dumps({"state":"OFF"}), qos=0, retain=False)
+        self._state = False
+        self.async_write_ha_state()
