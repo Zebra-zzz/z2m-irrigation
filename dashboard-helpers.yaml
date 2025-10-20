@@ -170,7 +170,7 @@ script:
     icon: mdi:calendar-plus
     mode: single
     sequence:
-      - service: z2m_irrigation.create_schedule
+      - action: z2m_irrigation.create_schedule
         data:
           name: "{{ states('input_text.schedule_name') }}"
           valve: "{{ states('input_select.schedule_valve') }}"
@@ -231,7 +231,7 @@ script:
             {% endif %}
             {{ cond if cond | length > 0 else {} }}
           enabled: true
-      - service: persistent_notification.create
+      - action: persistent_notification.create
         data:
           title: "Schedule Created"
           message: "Time-based schedule '{{ states('input_text.schedule_name') }}' has been created successfully!"
@@ -241,7 +241,7 @@ script:
     icon: mdi:timer-plus
     mode: single
     sequence:
-      - service: z2m_irrigation.create_schedule
+      - action: z2m_irrigation.create_schedule
         data:
           name: "{{ states('input_text.schedule_name') }}"
           valve: "{{ states('input_select.schedule_valve') }}"
@@ -270,7 +270,7 @@ script:
             {% endif %}
             {{ cond if cond | length > 0 else {} }}
           enabled: true
-      - service: persistent_notification.create
+      - action: persistent_notification.create
         data:
           title: "Schedule Created"
           message: "Interval schedule '{{ states('input_text.schedule_name') }}' has been created successfully!"
