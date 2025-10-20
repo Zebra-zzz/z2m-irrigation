@@ -1,32 +1,12 @@
 start_timed:
   name: Start timed session
-  description: Turn the valve on for a fixed number of minutes.
-  fields:
-    valve:
-      name: Valve (Zigbee2MQTT friendly name)
-      required: true
-      selector: {text: {}}
-    minutes:
-      name: Minutes
-      required: true
-      selector: {number: {min: 0, step: 1}}
+  fields: { valve: {name: Valve, selector: {text: {}}}, minutes: {name: Minutes, selector: {number: {min: 0, step: 1}}}}
 start_liters:
   name: Start liters session
-  description: Turn the valve on until the specified liters have flowed (based on flow readings).
-  fields:
-    valve:
-      name: Valve (Zigbee2MQTT friendly name)
-      required: true
-      selector: {text: {}}
-    liters:
-      name: Liters
-      required: true
-      selector: {number: {min: 0, step: 0.1}}
+  fields: { valve: {name: Valve, selector: {text: {}}}, liters: {name: Liters, selector: {number: {min: 0, step: 0.1}}}}
 reset_totals:
   name: Reset totals
-  description: Reset total liters and total minutes. If valve is omitted, resets all valves.
-  fields:
-    valve:
-      name: Valve (optional)
-      required: false
-      selector: {text: {}}
+  fields: { valve: {name: Valve (optional), required: false, selector: {text: {}}}}
+rescan:
+  name: Rescan Zigbee2MQTT devices
+  description: Re-requests the device list and re-subscribes without restarting.

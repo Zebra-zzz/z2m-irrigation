@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Iterable
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.components import mqtt
@@ -13,10 +14,13 @@ from homeassistant.helpers.event import async_call_later
 from .const import (
     CONF_BASE_TOPIC,
     DEFAULT_BASE_TOPIC,
+    CONF_MANUAL_TOPICS,
     SIG_NEW_VALVE,
     Z2M_MODEL,
     sig_update,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class Valve:
@@ -34,24 +38,32 @@ class Valve:
     cancel_handle: Optional[Callable[[], None]] = None
 
 class ValveManager:
-    def __init__(self, hass: HomeAssistant, base_topic: str = DEFAULT_BASE_TOPIC) -> None:
+    def __init__(self, hass: HomeAssistant, base_topic: str = DEFAULT_BASE_TOPIC, manual_topics: Iterable[str] = ()) -> None:
         self.hass = hass
         self.base = base_topic or DEFAULT_BASE_TOPIC
+        self.manual_topics = [t for t in (manual_topics or []) if t]
         self.valves: Dict[str, Valve] = {}
         self._unsubs: list[Callable[[], None]] = []
 
     async def async_start(self) -> None:
-        # Subscribe to BOTH possible responses from Z2M
+        _LOGGER.debug("Starting ValveManager base=%s manual=%s", self.base, self.manual_topics)
+        # Subscriptions for device list (two possible topics)
         self._unsubs.append(
             await mqtt.async_subscribe(self.hass, f"{self.base}/bridge/devices", self._on_devices)
         )
         self._unsubs.append(
             await mqtt.async_subscribe(self.hass, f"{self.base}/bridge/config/devices", self._on_devices)
         )
+        # Subscribe to all manual topics immediately
+        for topic in self.manual_topics:
+            self._ensure_valve(topic, topic)
+
         # Ask Z2M to send the device list
         await mqtt.async_publish(self.hass, f"{self.base}/bridge/config/devices/get", "")
+        _LOGGER.debug("Requested device list on %s/bridge/config/devices/get", self.base)
 
     async def async_stop(self) -> None:
+        _LOGGER.debug("Stopping ValveManager")
         while self._unsubs:
             self._unsubs.pop()()
 
@@ -59,20 +71,29 @@ class ValveManager:
     def _on_devices(self, msg) -> None:
         try:
             devices = json.loads(msg.payload)
-            if not isinstance(devices, list):
-                return
-        except Exception:
+        except Exception as e:
+            _LOGGER.debug("Device list parse error: %s", e)
             return
+        if not isinstance(devices, list):
+            return
+
+        added = 0
         for d in devices:
-            model = (d.get("definition") or {}).get("model")
+            model = (d.get("definition") or {}).get("model") or d.get("model")
             if model != Z2M_MODEL:
                 continue
-            topic = d.get("friendly_name")
-            if not topic or topic in self.valves:
+            topic = d.get("friendly_name") or d.get("friendlyName")
+            if not topic:
                 continue
-            self._add_valve(topic, topic)
+            if topic in self.valves:
+                continue
+            self._ensure_valve(topic, topic); added += 1
+        if added:
+            _LOGGER.info("Discovered %d Sonoff SWV valve(s)", added)
 
-    def _add_valve(self, topic: str, name: str) -> None:
+    def _ensure_valve(self, topic: str, name: str) -> None:
+        if topic in self.valves:
+            return
         v = Valve(topic=topic, name=name)
         self.valves[topic] = v
 
@@ -82,6 +103,7 @@ class ValveManager:
                     self.hass, f"{self.base}/{topic}", lambda m: self._on_state(topic, m)
                 )
             )
+            _LOGGER.debug("Subscribed to %s/%s", self.base, topic)
         self.hass.async_create_task(_sub())
 
         async_dispatcher_send(self.hass, SIG_NEW_VALVE, v)
@@ -100,14 +122,12 @@ class ValveManager:
         dt = max(0.0, now - v.last_ts)
         v.last_ts = now
 
-        # integrate while active
         if v.session_active:
             liters = (v.flow_lpm / 60.0) * dt
             v.session_liters += liters
             v.total_liters += liters
             v.total_minutes += dt / 60.0
 
-        # state change?
         if "state" in data:
             new_state = data.get("state")
             if new_state == "ON" and not v.session_active:
@@ -121,14 +141,12 @@ class ValveManager:
                     v.cancel_handle(); v.cancel_handle = None
             v.state = new_state
 
-        # flow
         if "flow" in data:
             try:
                 v.flow_lpm = float(data["flow"]) or 0.0
             except Exception:
                 v.flow_lpm = 0.0
 
-        # liters target reached?
         if v.session_active and v.target_liters is not None and v.session_liters >= v.target_liters:
             self.hass.async_create_task(self.async_turn_off(v.topic))
             v.target_liters = None
