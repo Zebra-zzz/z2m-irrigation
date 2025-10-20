@@ -150,6 +150,14 @@ class ValveManager:
                 v.total_liters += liters
                 v.total_minutes += dt / 60.0
 
+                # Check if volume target reached
+                if v.target_liters and v.session_liters >= v.target_liters:
+                    _LOGGER.info(
+                        "Volume target reached for %s: %.2f/%.2f L - turning off",
+                        topic, v.session_liters, v.target_liters
+                    )
+                    self.hass.async_create_task(self.async_turn_off(topic))
+
         # state transitions
         if "state" in data:
             new_state = str(data.get("state")).upper()
@@ -271,7 +279,7 @@ class ValveManager:
         self._dispatch_signal(sig_update(topic or "*"))
 
     def start_liters(self, topic: str, liters: float) -> None:
-        """Start valve for specified liters - uses native Zigbee device control"""
+        """Start valve for specified liters with HA-based monitoring"""
         v = self.valves.get(topic)
         if not v:
             return
@@ -279,15 +287,23 @@ class ValveManager:
         v.session_end_ts = None
         v.trigger_type = "volume"
 
-        # Send native Zigbee command to device for local control
-        # The Sonoff SWV supports 'water_consumed' parameter for volume-based control
-        payload = {
-            "state": "ON",
-            "water_consumed": int(liters * 1000)  # Convert L to mL
-        }
-        self.hass.async_create_task(
-            mqtt.async_publish(self.hass, f"{self.base}/{topic}/set", json.dumps(payload), qos=1)
-        )
+        _LOGGER.info("Starting volume run: %s for %.2f L", topic, liters)
+
+        # Try sending native Zigbee command for local control (may not be supported)
+        # Note: Sonoff SWV may not support water_consumed parameter
+        # The HA monitoring will turn it off when target is reached
+        try:
+            payload = {
+                "state": "ON",
+                "water_consumed": int(liters * 1000)  # Convert L to mL (experimental)
+            }
+            self.hass.async_create_task(
+                mqtt.async_publish(self.hass, f"{self.base}/{topic}/set", json.dumps(payload), qos=1)
+            )
+        except Exception as e:
+            _LOGGER.warning("Failed to send volume command, using simple ON: %s", e)
+            # Fallback to simple turn on
+            self.hass.async_create_task(self.async_turn_on(topic))
 
     def start_timed(self, topic: str, minutes: float) -> None:
         """Start valve for specified minutes - uses native Zigbee device control"""

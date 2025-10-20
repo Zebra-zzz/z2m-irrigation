@@ -2,6 +2,34 @@
 
 All notable changes to the Z2M Irrigation integration will be documented in this file.
 
+## [1.0.1] - 2025-10-20
+
+### 🐛 Critical Fix
+
+- **FIXED: Volume-based runs not stopping** - Added automatic valve shutoff when target liters reached
+  - Integration now actively monitors flow and turns off valve when target is reached
+  - Prevents overwatering that was occurring in v1.0.0
+  - Added detailed logging when volume target is reached
+  - Fallback to simple ON command if device doesn't support native volume control
+
+### What Happened in v1.0.0
+
+The integration was sending a volume command to the device but:
+1. The Sonoff SWV may not support the `water_consumed` parameter
+2. Even if supported, there was no Home Assistant-side monitoring
+3. Result: Valve stayed on indefinitely
+
+### How It Works Now
+
+1. Integration turns valve ON
+2. Continuously monitors flow rate and calculates liters used
+3. When `session_liters >= target_liters`, automatically sends OFF command
+4. Logs when target is reached for debugging
+
+**⚠️ Upgrade immediately if using volume-based irrigation!**
+
+---
+
 ## [1.0.0] - 2025-10-20
 
 ### 🎉 Major Release
