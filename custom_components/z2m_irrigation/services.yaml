@@ -1,12 +1,17 @@
 start_timed:
   name: Start timed session
-  fields: { valve: {name: Valve, selector: {text: {}}}, minutes: {name: Minutes, selector: {number: {min: 0, step: 1}}}}
+  fields:
+    valve: {name: Valve, selector: {text: {}}}
+    minutes: {name: Minutes, selector: {number: {min: 0, step: 1}}}
 start_liters:
   name: Start liters session
-  fields: { valve: {name: Valve, selector: {text: {}}}, liters: {name: Liters, selector: {number: {min: 0, step: 0.1}}}}
+  fields:
+    valve: {name: Valve, selector: {text: {}}}
+    liters: {name: Liters, selector: {number: {min: 0, step: 0.1}}}
 reset_totals:
   name: Reset totals
-  fields: { valve: {name: Valve (optional), required: false, selector: {text: {}}}}
+  fields:
+    valve: {name: Valve (optional), required: false, selector: {text: {}}}
 rescan:
   name: Rescan Zigbee2MQTT devices
   description: Re-requests the device list and re-subscribes without restarting.
