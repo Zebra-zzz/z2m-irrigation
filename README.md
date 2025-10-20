@@ -113,16 +113,19 @@ The integration subscribes to Zigbee2MQTT bridge topics:
 
 It identifies Sonoff SWV devices and subscribes to each valve's topic.
 
-### Native Device Control with HA Backup
-When you start a timed or volume-based run:
-- **Timed**: Sends `cyclic_timed_irrigation` command to device for native control
-  - Device handles shutoff automatically
-  - HA backup timer as failsafe
-- **Volume**: Sends `cyclic_quantitative_irrigation` command to device for native control
-  - Device handles shutoff automatically at target liters
-  - HA monitors flow and will force shutoff if device fails (failsafe)
+### Triple Failsafe System
 
-**Dual-Layer Safety**: Both native device control AND Home Assistant monitoring ensure reliable operation even if one layer fails.
+**Volume-Based Irrigation (3 layers):**
+1. 🔵 **Native Device Control** - Device programmed to stop at target liters
+2. 🟡 **Real-Time Monitoring** - HA checks flow every 2-4 seconds
+3. 🔴 **Forced Shutoff** - HA sends OFF if target exceeded
+
+**Time-Based Irrigation (3 layers):**
+1. 🔵 **Native Device Control** - Device programmed to stop at target time
+2. 🟡 **Real-Time Monitoring** - HA checks elapsed time every update
+3. 🔴 **Backup Timer** - HA timer forces OFF at exact target time
+
+**Safety Guarantee**: Even if the Zigbee device completely fails or disconnects, Home Assistant will ALWAYS force the valve OFF when targets are reached. All failsafe activations are logged as WARNINGS for visibility.
 
 ### Data Storage
 - **Real-time data**: Tracked in memory for instant updates

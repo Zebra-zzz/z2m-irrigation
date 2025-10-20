@@ -33,19 +33,19 @@ All notable changes to the Z2M Irrigation integration will be documented in this
 - Volume: `{"cyclic_quantitative_irrigation": {"current_count": 0, "total_number": 1, "irrigation_capacity": 6, "irrigation_interval": 0}}` ✅
 - Timed: `{"cyclic_timed_irrigation": {"current_count": 0, "total_number": 1, "irrigation_duration": 360, "irrigation_interval": 0}}` ✅
 
-### How It Works Now
+### How It Works Now - Triple Failsafe System
 
-**Volume Runs:**
-1. Send native command to device with target liters
-2. Device handles shutoff automatically
-3. HA monitors flow as backup and logs progress
-4. HA will force shutoff if device fails (failsafe)
+**Volume Runs (3 layers of protection):**
+1. **Native Device Control**: `cyclic_quantitative_irrigation` command tells device to stop at target
+2. **Real-time Monitoring**: HA checks every MQTT update if `session_liters >= target_liters`
+3. **Forced Shutoff**: If target exceeded, HA sends OFF command immediately (logged as WARNING)
 
-**Timed Runs:**
-1. Send native command to device with duration in seconds
-2. Device handles shutoff automatically
-3. HA sets backup timer (failsafe)
-4. HA will force shutoff if device fails
+**Timed Runs (3 layers of protection):**
+1. **Native Device Control**: `cyclic_timed_irrigation` command tells device to stop at target time
+2. **Real-time Monitoring**: HA checks every MQTT update if `now >= session_end_ts`
+3. **Backup Timer**: HA timer fires at exact target time and forces OFF if still running (logged as WARNING)
+
+**Result**: Even if the device completely fails, HA will ALWAYS turn off the valve when targets are reached.
 
 **⚠️ Upgrade immediately if using volume-based irrigation!**
 

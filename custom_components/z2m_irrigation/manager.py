@@ -150,13 +150,23 @@ class ValveManager:
                 v.total_liters += liters
                 v.total_minutes += dt / 60.0
 
-                # Check if volume target reached
-                if v.target_liters and v.session_liters >= v.target_liters:
-                    _LOGGER.info(
-                        "Volume target reached for %s: %.2f/%.2f L - turning off",
-                        topic, v.session_liters, v.target_liters
-                    )
-                    self.hass.async_create_task(self.async_turn_off(topic))
+            # FAILSAFE: Check if volume target reached (backup to native device control)
+            if v.target_liters and v.session_liters >= v.target_liters:
+                _LOGGER.warning(
+                    "FAILSAFE: Volume target exceeded for %s: %.2f/%.2f L - forcing OFF",
+                    topic, v.session_liters, v.target_liters
+                )
+                self.hass.async_create_task(self.async_turn_off(topic))
+
+            # FAILSAFE: Check if time target reached (backup to native device control)
+            if v.session_end_ts and now >= v.session_end_ts:
+                elapsed_min = (now - v.session_start_ts) / 60.0
+                target_min = (v.session_end_ts - v.session_start_ts) / 60.0
+                _LOGGER.warning(
+                    "FAILSAFE: Time target exceeded for %s: %.2f/%.2f min - forcing OFF",
+                    topic, elapsed_min, target_min
+                )
+                self.hass.async_create_task(self.async_turn_off(topic))
 
         # state transitions
         if "state" in data:
@@ -305,6 +315,10 @@ class ValveManager:
             mqtt.async_publish(self.hass, f"{self.base}/{topic}/set", json.dumps(payload), qos=1)
         )
 
+        # FAILSAFE: HA monitors flow in _on_state() callback
+        # If session_liters >= target_liters, will force OFF command
+        # This catches cases where device fails to stop at target
+
     def start_timed(self, topic: str, minutes: float) -> None:
         """Start valve for specified minutes using native cyclic_timed_irrigation"""
         v = self.valves.get(topic)
@@ -335,9 +349,10 @@ class ValveManager:
             mqtt.async_publish(self.hass, f"{self.base}/{topic}/set", json.dumps(payload), qos=1)
         )
 
-        # Also set HA-side backup timer in case device doesn't respond
+        # FAILSAFE: Set HA-side backup timer in case device doesn't respond
+        # This timer will fire if device fails to turn off at target time
         async def _off(_):
-            _LOGGER.info("Backup timer expired for %s - turning off", topic)
+            _LOGGER.warning("FAILSAFE: Backup timer expired for %s - forcing OFF", topic)
             await self.async_turn_off(topic)
             if v.cancel_handle:
                 v.cancel_handle(); v.cancel_handle = None
