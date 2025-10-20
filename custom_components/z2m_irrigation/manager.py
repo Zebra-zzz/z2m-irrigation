@@ -198,7 +198,7 @@ class ValveManager:
             v.state = new_state
 
         # flow normalization to L/min
-        # Sonoff SWV reports flow in m³/h, convert to L/min: 1 m³/h = 16.667 L/min
+        # Sonoff SWV reports flow in m³/h, convert to L/min
         if "flow_lpm" in data:
             try:
                 v.flow_lpm = float(data["flow_lpm"]) or 0.0
@@ -207,8 +207,10 @@ class ValveManager:
         elif "flow" in data:
             try:
                 raw_flow = float(data["flow"]) or 0.0
+                # Device reports in m³/h
                 # Convert m³/h to L/min: multiply by 1000/60 = 16.667
-                v.flow_lpm = raw_flow * 16.667 * getattr(self, "flow_scale", 1.0)
+                # Then apply user's flow_scale if needed (default 1.0)
+                v.flow_lpm = raw_flow * 16.667 * self.flow_scale
             except Exception:
                 v.flow_lpm = 0.0
 
@@ -287,26 +289,14 @@ class ValveManager:
         v.session_end_ts = None
         v.trigger_type = "volume"
 
-        _LOGGER.info("Starting volume run: %s for %.2f L", topic, liters)
+        _LOGGER.info("Starting volume run: %s for %.2f L (HA monitoring)", topic, liters)
 
-        # Try sending native Zigbee command for local control (may not be supported)
-        # Note: Sonoff SWV may not support water_consumed parameter
-        # The HA monitoring will turn it off when target is reached
-        try:
-            payload = {
-                "state": "ON",
-                "water_consumed": int(liters * 1000)  # Convert L to mL (experimental)
-            }
-            self.hass.async_create_task(
-                mqtt.async_publish(self.hass, f"{self.base}/{topic}/set", json.dumps(payload), qos=1)
-            )
-        except Exception as e:
-            _LOGGER.warning("Failed to send volume command, using simple ON: %s", e)
-            # Fallback to simple turn on
-            self.hass.async_create_task(self.async_turn_on(topic))
+        # Sonoff SWV does not support water_consumed parameter via Z2M
+        # Use simple ON and HA will monitor flow and turn off when target reached
+        self.hass.async_create_task(self.async_turn_on(topic))
 
     def start_timed(self, topic: str, minutes: float) -> None:
-        """Start valve for specified minutes - uses native Zigbee device control"""
+        """Start valve for specified minutes with HA-based timer"""
         v = self.valves.get(topic)
         if not v:
             return
@@ -318,18 +308,15 @@ class ValveManager:
         v.session_end_ts = now + run_s
         v.trigger_type = "timed"
 
-        # Send native Zigbee command to device for local control
-        # The Sonoff SWV supports 'timer' parameter for time-based control
-        payload = {
-            "state": "ON",
-            "timer": int(minutes)  # Timer in minutes
-        }
-        self.hass.async_create_task(
-            mqtt.async_publish(self.hass, f"{self.base}/{topic}/set", json.dumps(payload), qos=1)
-        )
+        _LOGGER.info("Starting timed run: %s for %.2f min (HA timer)", topic, minutes)
 
-        # Also set local timer as backup
+        # Sonoff SWV does not support timer parameter via Z2M
+        # Use simple ON and HA timer will turn off when duration reached
+        self.hass.async_create_task(self.async_turn_on(topic))
+
+        # Set HA-side timer to turn off
         async def _off(_):
+            _LOGGER.info("Timer expired for %s - turning off", topic)
             await self.async_turn_off(topic)
             if v.cancel_handle:
                 v.cancel_handle(); v.cancel_handle = None

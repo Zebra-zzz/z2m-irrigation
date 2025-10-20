@@ -113,12 +113,12 @@ The integration subscribes to Zigbee2MQTT bridge topics:
 
 It identifies Sonoff SWV devices and subscribes to each valve's topic.
 
-### Native Zigbee Control
-When you start a timed or volume-based run, the integration sends commands directly to the Zigbee device:
-- **Timed**: `{"state": "ON", "timer": minutes}`
-- **Volume**: `{"state": "ON", "water_consumed": milliliters}`
+### Smart Monitoring & Control
+When you start a timed or volume-based run:
+- **Timed**: Home Assistant sets a timer and automatically turns off the valve when time expires
+- **Volume**: Home Assistant monitors flow in real-time and turns off when target liters reached
 
-This ensures the valve operates locally even if Home Assistant or the network goes down.
+**Note**: The Sonoff SWV's native timer/volume features are not exposed through Zigbee2MQTT. Home Assistant provides reliable monitoring and control instead.
 
 ### Data Storage
 - **Real-time data**: Tracked in memory for instant updates

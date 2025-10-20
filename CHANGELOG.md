@@ -4,27 +4,47 @@ All notable changes to the Z2M Irrigation integration will be documented in this
 
 ## [1.0.1] - 2025-10-20
 
-### 🐛 Critical Fix
+### 🐛 Critical Fixes
 
-- **FIXED: Volume-based runs not stopping** - Added automatic valve shutoff when target liters reached
+#### Volume-Based Runs Not Stopping
+- **FIXED**: Added automatic valve shutoff when target liters reached
   - Integration now actively monitors flow and turns off valve when target is reached
   - Prevents overwatering that was occurring in v1.0.0
   - Added detailed logging when volume target is reached
-  - Fallback to simple ON command if device doesn't support native volume control
 
-### What Happened in v1.0.0
+#### Native Device Commands Not Supported
+- **CONFIRMED**: Sonoff SWV's timer/volume features not exposed via Zigbee2MQTT
+  - Z2M logs show: "No converter available for 'water_consumed'" and "'timer'"
+  - Removed unsupported native command attempts
+  - All control now handled by Home Assistant (more reliable!)
 
-The integration was sending a volume command to the device but:
-1. The Sonoff SWV may not support the `water_consumed` parameter
-2. Even if supported, there was no Home Assistant-side monitoring
-3. Result: Valve stayed on indefinitely
+#### Flow Conversion Clarified
+- **DOCUMENTED**: Device reports flow in m³/h, not L/min
+  - Conversion: 1 m³/h = 16.667 L/min
+  - `flow_scale` is a user multiplier (default 1.0)
+
+### Technical Details from Z2M Logs
+
+Testing revealed the Sonoff SWV:
+1. Reports `"flow"` in m³/h (e.g., 0.7, 0.6, 0.5)
+2. Does NOT support `water_consumed` parameter
+3. Does NOT support `timer`, `irrigation_time`, or `duration` parameters
+4. HAS `cyclic_quantitative_irrigation` fields but not controllable via Z2M
 
 ### How It Works Now
 
-1. Integration turns valve ON
-2. Continuously monitors flow rate and calculates liters used
-3. When `session_liters >= target_liters`, automatically sends OFF command
-4. Logs when target is reached for debugging
+**Volume Runs:**
+1. Valve turns ON via simple MQTT
+2. HA monitors flow every 2-4 seconds
+3. Calculates liters: `(flow_m3h × 16.667 ÷ 60) × seconds`
+4. Turns OFF when target reached
+5. Overshoot: ~0.1-0.2L (reaction time)
+
+**Timed Runs:**
+1. Valve turns ON
+2. HA timer set for duration
+3. Timer expires → OFF
+4. Accuracy: ±1 second
 
 **⚠️ Upgrade immediately if using volume-based irrigation!**
 
