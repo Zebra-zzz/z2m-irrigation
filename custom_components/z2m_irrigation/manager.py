@@ -75,6 +75,11 @@ class ValveManager:
         while self._unsubs:
             self._unsubs.pop()()
 
+    # ---------- internal helpers ----------
+    def _dispatch_signal(self, signal: str, *args) -> None:
+        """Always fire dispatcher on HA loop thread (safe from any callback thread)."""
+        self.hass.loop.call_soon_threadsafe(async_dispatcher_send, self.hass, signal, *args)
+
     @callback
     def _on_devices(self, msg) -> None:
         try:
@@ -91,11 +96,10 @@ class ValveManager:
             if model != Z2M_MODEL:
                 continue
             topic = d.get("friendly_name") or d.get("friendlyName")
-            if not topic:
+            if not topic or topic in self.valves:
                 continue
-            if topic in self.valves:
-                continue
-            self._ensure_valve(topic, topic); added += 1
+            self._ensure_valve(topic, topic)
+            added += 1
         if added:
             _LOGGER.info("Discovered %d Sonoff SWV valve(s)", added)
 
@@ -114,7 +118,8 @@ class ValveManager:
             _LOGGER.debug("Subscribed to %s/%s", self.base, topic)
         self.hass.async_create_task(_sub())
 
-        async_dispatcher_send(self.hass, SIG_NEW_VALVE, v)
+        # announce new valve safely
+        self._dispatch_signal(SIG_NEW_VALVE, v)
 
     @callback
     def _on_state(self, topic: str, msg) -> None:
@@ -157,24 +162,21 @@ class ValveManager:
                         v.cancel_handle(); v.cancel_handle = None
             v.state = new_state
 
-        # flow units normalization
+        # flow normalization to L/min
         if "flow_lpm" in data:
             try:
                 v.flow_lpm = float(data["flow_lpm"]) or 0.0
             except Exception:
                 v.flow_lpm = 0.0
         elif "flow" in data:
-            # convert using flow_scale so final is L/min
             try:
-                v.flow_lpm = (float(data["flow"]) or 0.0) * self.flow_scale
+                v.flow_lpm = (float(data["flow"]) or 0.0) * getattr(self, "flow_scale", 1.0)
             except Exception:
                 v.flow_lpm = 0.0
 
-        # optional direct consumption total coming from device
+        # optional absolute total from device
         if "consumption" in data:
             try:
-                # keep our own running total, but if device supplies a sane absolute,
-                # adopt it as floor to avoid going backwards.
                 dev_total = float(data["consumption"])
                 if dev_total >= 0 and dev_total > v.total_liters:
                     v.total_liters = dev_total
@@ -187,7 +189,8 @@ class ValveManager:
             v.target_liters = None
             v.session_end_ts = None
 
-        async_dispatcher_send(self.hass, sig_update(topic))
+        # SAFE dispatcher fire
+        self._dispatch_signal(sig_update(topic))
 
     async def async_turn_on(self, topic: str) -> None:
         await mqtt.async_publish(self.hass, f"{self.base}/{topic}/set", json.dumps({"state": "ON"}), qos=1)
@@ -207,7 +210,8 @@ class ValveManager:
                 v.total_liters = 0.0
                 v.total_minutes = 0.0
                 v.session_liters = 0.0
-        async_dispatcher_send(self.hass, sig_update(topic or "*"))
+        # safe wildcard notify
+        self._dispatch_signal(sig_update(topic or "*"))
 
     def start_liters(self, topic: str, liters: float) -> None:
         v = self.valves.get(topic)
