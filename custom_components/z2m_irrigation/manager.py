@@ -58,7 +58,7 @@ class ValveManager:
         self.flow_scale = float(flow_scale or 1.0)
         self.valves: Dict[str, Valve] = {}
         self._unsubs: list[Callable[[], None]] = []
-        self.history = SessionHistory()
+        self.history = SessionHistory(hass)
 
     async def async_start(self) -> None:
         _LOGGER.debug("Starting ValveManager base=%s manual=%s scale=%s", self.base, self.manual_topics, self.flow_scale)
@@ -271,15 +271,26 @@ class ValveManager:
         self._dispatch_signal(sig_update(topic or "*"))
 
     def start_liters(self, topic: str, liters: float) -> None:
+        """Start valve for specified liters - uses native Zigbee device control"""
         v = self.valves.get(topic)
         if not v:
             return
         v.target_liters = max(0.0, float(liters))
         v.session_end_ts = None
         v.trigger_type = "volume"
-        self.hass.async_create_task(self.async_turn_on(topic))
+
+        # Send native Zigbee command to device for local control
+        # The Sonoff SWV supports 'water_consumed' parameter for volume-based control
+        payload = {
+            "state": "ON",
+            "water_consumed": int(liters * 1000)  # Convert L to mL
+        }
+        self.hass.async_create_task(
+            mqtt.async_publish(self.hass, f"{self.base}/{topic}/set", json.dumps(payload), qos=1)
+        )
 
     def start_timed(self, topic: str, minutes: float) -> None:
+        """Start valve for specified minutes - uses native Zigbee device control"""
         v = self.valves.get(topic)
         if not v:
             return
@@ -291,6 +302,17 @@ class ValveManager:
         v.session_end_ts = now + run_s
         v.trigger_type = "timed"
 
+        # Send native Zigbee command to device for local control
+        # The Sonoff SWV supports 'timer' parameter for time-based control
+        payload = {
+            "state": "ON",
+            "timer": int(minutes)  # Timer in minutes
+        }
+        self.hass.async_create_task(
+            mqtt.async_publish(self.hass, f"{self.base}/{topic}/set", json.dumps(payload), qos=1)
+        )
+
+        # Also set local timer as backup
         async def _off(_):
             await self.async_turn_off(topic)
             if v.cancel_handle:
@@ -298,4 +320,3 @@ class ValveManager:
             v.session_end_ts = None
 
         v.cancel_handle = async_call_later(self.hass, run_s, _off)
-        self.hass.async_create_task(self.async_turn_on(topic))

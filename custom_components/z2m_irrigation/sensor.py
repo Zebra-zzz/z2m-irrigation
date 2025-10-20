@@ -12,9 +12,11 @@ async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
         await async_add_entities([
             FlowLpm(mgr, v),
             SessionUsed(mgr, v),
+            SessionDuration(mgr, v),
             TotalLiters(mgr, v),
             TotalMinutes(mgr, v),
-            SessionRemaining(mgr, v),
+            SessionRemainingTime(mgr, v),
+            SessionRemainingLiters(mgr, v),
             SessionCount(mgr, v),
             BatteryLevel(mgr, v),
             LinkQuality(mgr, v),
@@ -66,15 +68,53 @@ class TotalMinutes(BaseValveSensor):
     @property
     def native_value(self): return round(self.valve.total_minutes, 2)
 
-class SessionRemaining(BaseValveSensor):
-    def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Session Remaining", "min", "measurement")
+class SessionDuration(BaseValveSensor):
+    def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Session Duration", "min", "measurement")
     @property
     def native_value(self):
-        # Only meaningful when a timed run is scheduled
-        if self.valve.session_end_ts is None:
+        import time
+        if not self.valve.session_active:
+            return 0
+        elapsed_s = time.monotonic() - self.valve.session_start_ts
+        return round(elapsed_s / 60.0, 2)
+
+class SessionRemainingTime(BaseValveSensor):
+    def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Remaining Time", "min", "measurement")
+    @property
+    def native_value(self):
+        import time
+        if not self.valve.session_active:
             return None
-        remaining_s = max(0.0, self.valve.session_end_ts - self.valve.last_ts)
-        return round(remaining_s / 60.0, 2)
+        # If timed run, show actual remaining time
+        if self.valve.session_end_ts is not None:
+            remaining_s = max(0.0, self.valve.session_end_ts - time.monotonic())
+            return round(remaining_s / 60.0, 2)
+        # If volume run with flow, estimate time
+        if self.valve.target_liters and self.valve.flow_lpm > 0:
+            remaining_liters = max(0, self.valve.target_liters - self.valve.session_liters)
+            estimated_min = remaining_liters / self.valve.flow_lpm
+            return round(estimated_min, 2)
+        # Manual operation - infinite
+        return None
+
+class SessionRemainingLiters(BaseValveSensor):
+    def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Remaining Liters", "L", "measurement")
+    @property
+    def native_value(self):
+        import time
+        if not self.valve.session_active:
+            return None
+        # If volume run, show actual remaining liters
+        if self.valve.target_liters is not None:
+            remaining = max(0, self.valve.target_liters - self.valve.session_liters)
+            return round(remaining, 2)
+        # If timed run with flow, estimate liters
+        if self.valve.session_end_ts and self.valve.flow_lpm > 0:
+            remaining_s = max(0.0, self.valve.session_end_ts - time.monotonic())
+            estimated_liters = (remaining_s / 60.0) * self.valve.flow_lpm
+            return round(estimated_liters, 2)
+        # Manual operation
+        return None
 
 class SessionCount(BaseValveSensor):
     def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Session Count", None, "total")
