@@ -15,12 +15,17 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     if entry.entry_id in hass.data[DOMAIN]:
-        _LOGGER.debug("Entry already present, skipping duplicate setup: %s", entry.entry_id)
+        _LOGGER.debug("Entry %s already set up; skipping.", entry.entry_id)
         return True
+
     mgr = ValveManager(hass, entry)
     hass.data[DOMAIN][entry.entry_id] = mgr
-    await mgr.async_start()
+
+    # Ensure platforms are ready before discovery/subscriptions start
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Start manager (MQTT subscriptions / discovery)
+    await mgr.async_start()
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
