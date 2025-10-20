@@ -1,56 +1,63 @@
 from __future__ import annotations
-from homeassistant.components.sensor import SensorEntity
-from homeassistant.core import HomeAssistant
+from typing import Any
+from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
+from homeassistant.const import UnitOfVolumeFlowRate
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo
-from .manager import ValveManager, Valve
-from .const import DOMAIN, MANUFACTURER, MODEL, SIG_NEW_VALVE, sig_update
+from .const import DOMAIN
+from .manager import ValveManager, sig_update, SIG_NEW_VALVE
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
     mgr: ValveManager = hass.data[DOMAIN][entry.entry_id]
-    def _add_for(v: Valve):
-        async_add_entities([FlowLpm(mgr, v), SessionUsed(mgr, v), TotalLiters(mgr, v), TotalMinutes(mgr, v)])
-    for v in list(mgr.valves.values()):
-        _add_for(v)
-    async_dispatcher_connect(hass, SIG_NEW_VALVE, _add_for)
+    entities: list[FlowSensor] = []
 
-class BaseValveSensor(SensorEntity):
+    def _add(topic: str):
+        ent = FlowSensor(hass, entry.entry_id, mgr, topic)
+        entities.append(ent)
+        async_add_entities([ent])
+
+    unsub = async_dispatcher_connect(hass, SIG_NEW_VALVE, _add)
+    mgr._unsubs.append(unsub)  # unregister on stop
+
+    for t in list(mgr.valves.keys()):
+        _add(t)
+
+class FlowSensor(SensorEntity):
     _attr_has_entity_name = True
-    def __init__(self, mgr: ValveManager, valve: Valve, name: str, unit: str | None, state_class: str | None):
-        self.mgr = mgr; self.valve = valve
-        self._attr_name = name
-        self._attr_native_unit_of_measurement = unit
-        self._attr_state_class = state_class
-        self._sig = sig_update(valve.topic); self._unsub = None
-    @property
-    def unique_id(self) -> str:
-        return f"{self.valve.topic}_{self.name}".lower().replace(" ", "_")
-    @property
-    def device_info(self) -> DeviceInfo:
-        return DeviceInfo(identifiers={(DOMAIN, self.valve.topic)}, manufacturer=MANUFACTURER, model=MODEL, name=self.valve.name)
-    async def async_added_to_hass(self) -> None:
-        def _cb(): self.async_write_ha_state()
-        self._unsub = async_dispatcher_connect(self.hass, self._sig, _cb)
+    _attr_name = "Flow"
+    _attr_device_class = SensorDeviceClass.VOLUME_FLOW_RATE
+    _attr_native_unit_of_measurement = UnitOfVolumeFlowRate.LITERS_PER_MINUTE
+
+    def __init__(self, hass: HomeAssistant, entry_id: str, mgr: ValveManager, topic: str) -> None:
+        self.hass = hass
+        self._mgr = mgr
+        self._topic = topic
+        self._attr_unique_id = f"{entry_id}_{topic}_flow"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{entry_id}_{topic}")},
+            manufacturer="Sonoff",
+            model="SWV",
+            name=topic,
+            via_device=(DOMAIN, entry_id),
+        )
+        self._val = 0.0
+        self._unsub = async_dispatcher_connect(hass, sig_update(topic), self._maybe_update)
+
     async def async_will_remove_from_hass(self) -> None:
-        if self._unsub: self._unsub(); self._unsub = None
+        if self._unsub:
+            self._unsub(); self._unsub = None  # type: ignore
 
-class FlowLpm(BaseValveSensor):
-    def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Flow", "L/min", "measurement")
-    @property
-    def native_value(self): return round(self.valve.flow_lpm, 2)
+    @callback
+    def _maybe_update(self) -> None:
+        data = self._mgr.valves.get(self._topic, {})
+        try:
+            self._val = float(data.get("flow", 0.0))
+        except Exception:
+            self._val = 0.0
+        self.async_write_ha_state()
 
-class SessionUsed(BaseValveSensor):
-    def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Session Used", "L", "measurement")
     @property
-    def native_value(self): return round(self.valve.session_liters, 2)
-
-class TotalLiters(BaseValveSensor):
-    def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Total", "L", "total_increasing")
-    @property
-    def native_value(self): return round(self.valve.total_liters, 2)
-
-class TotalMinutes(BaseValveSensor):
-    def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Total Minutes", "min", "total_increasing")
-    @property
-    def native_value(self): return round(self.valve.total_minutes, 1)
+    def native_value(self) -> float | None:
+        return self._val
