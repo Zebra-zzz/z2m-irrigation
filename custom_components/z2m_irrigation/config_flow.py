@@ -13,17 +13,13 @@ class Z2MIrrigationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(DOMAIN)
             self._abort_if_unique_id_configured()
             return self.async_create_entry(title="Z2M Irrigation", data={})
-
         return self.async_show_form(step_id="user", data_schema=vol.Schema({}))
 
-    async def async_step_reconfigure(self, user_input=None):
-        return await self.async_step_user(user_input)
-
-    async def async_get_options_flow(self, config_entry):
-        return OptionsFlowHandler(config_entry)
+    async def async_get_options_flow(self, entry):
+        return OptionsFlowHandler(entry)
 
 class OptionsFlowHandler(config_entries.OptionsFlow):
-    def __init__(self, entry) -> None:
+    def __init__(self, entry):
         self.entry = entry
 
     async def async_step_init(self, user_input=None):
@@ -33,9 +29,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         base = self.entry.options.get(CONF_BASE_TOPIC, DEFAULT_BASE_TOPIC)
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(CONF_BASE_TOPIC, default=base): str,
-                }
-            ),
+            data_schema=vol.Schema({
+                vol.Optional(CONF_BASE_TOPIC, default=base): str,
+            }),
         )

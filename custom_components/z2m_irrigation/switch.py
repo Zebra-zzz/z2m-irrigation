@@ -32,7 +32,7 @@ class ValveSwitch(SwitchEntity):
 
     @property
     def unique_id(self) -> str:
-        return f"{self.valve.topic}_switch"
+        return f"{self.valve.topic}_switch".lower().replace(" ", "_")
 
     @property
     def is_on(self) -> bool:

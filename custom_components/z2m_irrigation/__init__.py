@@ -1,21 +1,16 @@
 from __future__ import annotations
 
 import voluptuous as vol
-from typing import Any
 
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.const import CONF_NAME
 
 from .const import (
     DOMAIN,
     CONF_BASE_TOPIC,
     DEFAULT_BASE_TOPIC,
-    CONF_MANUAL_VALVES,
     PLATFORMS,
-    SIG_NEW_VALVE,
 )
 from .manager import ValveManager
 
@@ -41,11 +36,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     mgr = ValveManager(hass, base)
     hass.data[DOMAIN][entry.entry_id] = mgr
 
-    # services
     async def _start_timed(call):
         mgr.start_timed(call.data["valve"], call.data["minutes"])
+
     async def _start_liters(call):
         mgr.start_liters(call.data["valve"], call.data["liters"])
+
     async def _reset_totals(call):
         mgr.reset_totals(call.data.get("valve"))
 

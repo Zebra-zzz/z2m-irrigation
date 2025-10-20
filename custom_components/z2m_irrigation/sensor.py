@@ -22,15 +22,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             ]
         )
 
-    # add existing (if any) when platform loads
     for v in list(mgr.valves.values()):
         _add_for(v)
 
-    # add future ones
-    async def _on_new(v: Valve):
-        _add_for(v)
-
-    async_dispatcher_connect(hass, SIG_NEW_VALVE, _on_new)
+    async_dispatcher_connect(hass, SIG_NEW_VALVE, _add_for)
 
 class BaseValveSensor(SensorEntity):
     _attr_has_entity_name = True
@@ -44,7 +39,7 @@ class BaseValveSensor(SensorEntity):
 
     @property
     def unique_id(self) -> str:
-        return f"{self.valve.topic}_{self.name}"
+        return f"{self.valve.topic}_{self.name}".lower().replace(" ", "_")
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -62,8 +57,7 @@ class BaseValveSensor(SensorEntity):
 
     async def async_will_remove_from_hass(self) -> None:
         if self._unsub:
-            self._unsub()
-            self._unsub = None
+            self._unsub(); self._unsub = None
 
 class FlowLpmSensor(BaseValveSensor):
     def __init__(self, mgr: ValveManager, valve: Valve):

@@ -1,1 +1,4 @@
-{ "name": "Z2M Irrigation (Sonoff Valves)", "render_readme": true }
+{
+  "name": "Z2M Irrigation (Sonoff Valves)",
+  "render_readme": true
+}
