@@ -1,0 +1,799 @@
+# 💧 Complete Irrigation Controller Dashboard
+# Version 2.0.0 - Smart Scheduling System
+#
+# Installation Instructions:
+# 1. Go to Settings → Dashboards → Add Dashboard
+# 2. Name it "Irrigation Controller"
+# 3. Click the three dots → Edit Dashboard → Raw Configuration Editor
+# 4. Paste this entire file
+# 5. Update entity IDs to match your valve names
+
+title: 💧 Irrigation Controller
+theme: backend-selected
+views:
+  - title: Control Center
+    path: control
+    icon: mdi:water
+    badges: []
+    cards:
+      # ========================================
+      # SYSTEM STATUS BAR
+      # ========================================
+      - type: horizontal-stack
+        cards:
+          - type: custom:button-card
+            name: System Active
+            icon: mdi:water-check
+            show_state: false
+            styles:
+              card:
+                - height: 80px
+              name:
+                - font-size: 14px
+                - font-weight: bold
+              icon:
+                - color: var(--success-color)
+            tap_action:
+              action: none
+
+          - type: custom:button-card
+            name: Total Water Today
+            entity: sensor.irrigation_total_today
+            show_state: true
+            show_name: true
+            styles:
+              card:
+                - height: 80px
+              name:
+                - font-size: 12px
+              state:
+                - font-size: 20px
+                - font-weight: bold
+                - color: var(--primary-color)
+            tap_action:
+              action: none
+
+          - type: custom:button-card
+            name: Active Schedules
+            entity: sensor.irrigation_active_schedules
+            show_state: true
+            show_name: true
+            styles:
+              card:
+                - height: 80px
+              name:
+                - font-size: 12px
+              state:
+                - font-size: 20px
+                - font-weight: bold
+                - color: var(--accent-color)
+            tap_action:
+              action: none
+
+      # ========================================
+      # VALVE CONTROLS SECTION
+      # ========================================
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: |
+              ## 🚰 Valve Status & Controls
+              Quick access to all irrigation valves. Monitor status and run manual sessions.
+
+          # Water Valve 1 - Front Garden
+          - type: custom:stack-in-card
+            mode: vertical
+            cards:
+              - type: horizontal-stack
+                cards:
+                  - type: entity
+                    entity: switch.water_valve_1_valve
+                    name: Front Garden
+                    icon: mdi:sprinkler-variant
+
+                  - type: entity
+                    entity: sensor.water_valve_1_flow
+                    name: Flow Rate
+                    icon: mdi:water-pump
+
+                  - type: entity
+                    entity: sensor.water_valve_1_battery
+                    name: Battery
+                    icon: mdi:battery
+
+              - type: horizontal-stack
+                cards:
+                  - type: entity
+                    entity: sensor.water_valve_1_session_used
+                    name: Session Used
+                    icon: mdi:water
+
+                  - type: entity
+                    entity: sensor.water_valve_1_session_duration
+                    name: Duration
+                    icon: mdi:timer
+
+                  - type: entity
+                    entity: sensor.water_valve_1_remaining_time
+                    name: Remaining
+                    icon: mdi:timer-sand
+
+              - type: horizontal-stack
+                cards:
+                  - type: button
+                    name: 5 Minutes
+                    icon: mdi:timer
+                    tap_action:
+                      action: call-service
+                      service: z2m_irrigation.start_timed
+                      service_data:
+                        valve: Water Valve 1
+                        minutes: 5
+
+                  - type: button
+                    name: 15 Minutes
+                    icon: mdi:timer
+                    tap_action:
+                      action: call-service
+                      service: z2m_irrigation.start_timed
+                      service_data:
+                        valve: Water Valve 1
+                        minutes: 15
+
+                  - type: button
+                    name: 30 Liters
+                    icon: mdi:water
+                    tap_action:
+                      action: call-service
+                      service: z2m_irrigation.start_liters
+                      service_data:
+                        valve: Water Valve 1
+                        liters: 30
+
+                  - type: button
+                    name: Stop
+                    icon: mdi:stop
+                    tap_action:
+                      action: call-service
+                      service: switch.turn_off
+                      target:
+                        entity_id: switch.water_valve_1_valve
+
+          # Water Valve 2 - Lilly Pilly
+          - type: custom:stack-in-card
+            mode: vertical
+            cards:
+              - type: horizontal-stack
+                cards:
+                  - type: entity
+                    entity: switch.water_valve_2_valve
+                    name: Lilly Pilly
+                    icon: mdi:sprinkler-variant
+
+                  - type: entity
+                    entity: sensor.water_valve_2_flow
+                    name: Flow Rate
+                    icon: mdi:water-pump
+
+                  - type: entity
+                    entity: sensor.water_valve_2_battery
+                    name: Battery
+                    icon: mdi:battery
+
+              - type: horizontal-stack
+                cards:
+                  - type: entity
+                    entity: sensor.water_valve_2_session_used
+                    name: Session Used
+                    icon: mdi:water
+
+                  - type: entity
+                    entity: sensor.water_valve_2_session_duration
+                    name: Duration
+                    icon: mdi:timer
+
+                  - type: entity
+                    entity: sensor.water_valve_2_remaining_time
+                    name: Remaining
+                    icon: mdi:timer-sand
+
+              - type: horizontal-stack
+                cards:
+                  - type: button
+                    name: 5 Minutes
+                    icon: mdi:timer
+                    tap_action:
+                      action: call-service
+                      service: z2m_irrigation.start_timed
+                      service_data:
+                        valve: Water Valve 2
+                        minutes: 5
+
+                  - type: button
+                    name: 15 Minutes
+                    icon: mdi:timer
+                    tap_action:
+                      action: call-service
+                      service: z2m_irrigation.start_timed
+                      service_data:
+                        valve: Water Valve 2
+                        minutes: 15
+
+                  - type: button
+                    name: 20 Liters
+                    icon: mdi:water
+                    tap_action:
+                      action: call-service
+                      service: z2m_irrigation.start_liters
+                      service_data:
+                        valve: Water Valve 2
+                        liters: 20
+
+                  - type: button
+                    name: Stop
+                    icon: mdi:stop
+                    tap_action:
+                      action: call-service
+                      service: switch.turn_off
+                      target:
+                        entity_id: switch.water_valve_2_valve
+
+          # Water Valve 3 - Back Garden
+          - type: custom:stack-in-card
+            mode: vertical
+            cards:
+              - type: horizontal-stack
+                cards:
+                  - type: entity
+                    entity: switch.water_valve_3_valve
+                    name: Back Garden
+                    icon: mdi:sprinkler-variant
+
+                  - type: entity
+                    entity: sensor.water_valve_3_flow
+                    name: Flow Rate
+                    icon: mdi:water-pump
+
+                  - type: entity
+                    entity: sensor.water_valve_3_battery
+                    name: Battery
+                    icon: mdi:battery
+
+              - type: horizontal-stack
+                cards:
+                  - type: entity
+                    entity: sensor.water_valve_3_session_used
+                    name: Session Used
+                    icon: mdi:water
+
+                  - type: entity
+                    entity: sensor.water_valve_3_session_duration
+                    name: Duration
+                    icon: mdi:timer
+
+                  - type: entity
+                    entity: sensor.water_valve_3_remaining_time
+                    name: Remaining
+                    icon: mdi:timer-sand
+
+              - type: horizontal-stack
+                cards:
+                  - type: button
+                    name: 5 Minutes
+                    icon: mdi:timer
+                    tap_action:
+                      action: call-service
+                      service: z2m_irrigation.start_timed
+                      service_data:
+                        valve: Water Valve 3
+                        minutes: 5
+
+                  - type: button
+                    name: 15 Minutes
+                    icon: mdi:timer
+                    tap_action:
+                      action: call-service
+                      service: z2m_irrigation.start_timed
+                      service_data:
+                        valve: Water Valve 3
+                        minutes: 15
+
+                  - type: button
+                    name: 50 Liters
+                    icon: mdi:water
+                    tap_action:
+                      action: call-service
+                      service: z2m_irrigation.start_liters
+                      service_data:
+                        valve: Water Valve 3
+                        liters: 50
+
+                  - type: button
+                    name: Stop
+                    icon: mdi:stop
+                    tap_action:
+                      action: call-service
+                      service: switch.turn_off
+                      target:
+                        entity_id: switch.water_valve_3_valve
+
+          # Water Valve 4 - Mains Tap
+          - type: custom:stack-in-card
+            mode: vertical
+            cards:
+              - type: horizontal-stack
+                cards:
+                  - type: entity
+                    entity: switch.water_valve_4_valve
+                    name: Mains Tap
+                    icon: mdi:water-pump
+
+                  - type: entity
+                    entity: sensor.water_valve_4_flow
+                    name: Flow Rate
+                    icon: mdi:water-pump
+
+                  - type: entity
+                    entity: sensor.water_valve_4_battery
+                    name: Battery
+                    icon: mdi:battery
+
+              - type: horizontal-stack
+                cards:
+                  - type: entity
+                    entity: sensor.water_valve_4_session_used
+                    name: Session Used
+                    icon: mdi:water
+
+                  - type: entity
+                    entity: sensor.water_valve_4_session_duration
+                    name: Duration
+                    icon: mdi:timer
+
+                  - type: entity
+                    entity: sensor.water_valve_4_remaining_time
+                    name: Remaining
+                    icon: mdi:timer-sand
+
+              - type: horizontal-stack
+                cards:
+                  - type: button
+                    name: 10 Minutes
+                    icon: mdi:timer
+                    tap_action:
+                      action: call-service
+                      service: z2m_irrigation.start_timed
+                      service_data:
+                        valve: Water Valve 4
+                        minutes: 10
+
+                  - type: button
+                    name: 30 Minutes
+                    icon: mdi:timer
+                    tap_action:
+                      action: call-service
+                      service: z2m_irrigation.start_timed
+                      service_data:
+                        valve: Water Valve 4
+                        minutes: 30
+
+                  - type: button
+                    name: 100 Liters
+                    icon: mdi:water
+                    tap_action:
+                      action: call-service
+                      service: z2m_irrigation.start_liters
+                      service_data:
+                        valve: Water Valve 4
+                        liters: 100
+
+                  - type: button
+                    name: Stop
+                    icon: mdi:stop
+                    tap_action:
+                      action: call-service
+                      service: switch.turn_off
+                      target:
+                        entity_id: switch.water_valve_4_valve
+
+      # ========================================
+      # STATISTICS SECTION
+      # ========================================
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: |
+              ## 📊 Usage Statistics
+
+          - type: horizontal-stack
+            cards:
+              - type: statistic
+                entity: sensor.water_valve_1_total
+                name: Front Garden Total
+                period:
+                  calendar:
+                    period: month
+
+              - type: statistic
+                entity: sensor.water_valve_2_total
+                name: Lilly Pilly Total
+                period:
+                  calendar:
+                    period: month
+
+              - type: statistic
+                entity: sensor.water_valve_3_total
+                name: Back Garden Total
+                period:
+                  calendar:
+                    period: month
+
+              - type: statistic
+                entity: sensor.water_valve_4_total
+                name: Mains Tap Total
+                period:
+                  calendar:
+                    period: month
+
+  # ========================================
+  # SCHEDULING TAB
+  # ========================================
+  - title: Schedules
+    path: schedules
+    icon: mdi:calendar-clock
+    badges: []
+    cards:
+      # Schedule Management Header
+      - type: markdown
+        content: |
+          ## 🗓️ Irrigation Schedules
+          Create and manage automatic watering schedules. All schedules are stored in your Supabase database.
+
+      # Quick Actions
+      - type: horizontal-stack
+        cards:
+          - type: button
+            name: Create Time Schedule
+            icon: mdi:clock-plus
+            tap_action:
+              action: navigate
+              navigation_path: '#create-time-schedule'
+
+          - type: button
+            name: Create Interval Schedule
+            icon: mdi:timer-plus
+            tap_action:
+              action: navigate
+              navigation_path: '#create-interval-schedule'
+
+          - type: button
+            name: Reload Schedules
+            icon: mdi:refresh
+            tap_action:
+              action: call-service
+              service: z2m_irrigation.reload_schedules
+
+      # ========================================
+      # ACTIVE SCHEDULES LIST
+      # ========================================
+      - type: markdown
+        content: |
+          ### 📋 Active Schedules
+          Use the services below to manage your schedules. Get schedule IDs from Supabase.
+
+      # Schedule 1 Example (Template)
+      - type: custom:stack-in-card
+        mode: vertical
+        cards:
+          - type: markdown
+            content: |
+              #### Morning Lawn Watering
+              **Type:** Time-based | **Valve:** Water Valve 1 | **Duration:** 15 minutes
+              **Times:** 06:00 | **Days:** Mon-Fri | **Status:** ✅ Enabled
+
+          - type: horizontal-stack
+            cards:
+              - type: button
+                name: Run Now
+                icon: mdi:play
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.run_schedule_now
+                  service_data:
+                    schedule_id: "YOUR-SCHEDULE-ID-HERE"
+
+              - type: button
+                name: Disable
+                icon: mdi:pause
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.disable_schedule
+                  service_data:
+                    schedule_id: "YOUR-SCHEDULE-ID-HERE"
+
+              - type: button
+                name: Delete
+                icon: mdi:delete
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.delete_schedule
+                  service_data:
+                    schedule_id: "YOUR-SCHEDULE-ID-HERE"
+                confirmation:
+                  text: Are you sure you want to delete this schedule?
+
+      # ========================================
+      # CREATE TIME-BASED SCHEDULE
+      # ========================================
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: |
+              ---
+              ### ⏰ Create Time-Based Schedule
+              Water at specific times on specific days.
+
+          - type: entities
+            entities:
+              - type: section
+                label: Basic Settings
+              - input_text.schedule_name
+              - input_select.schedule_valve
+              - input_select.schedule_run_type
+
+          - type: entities
+            entities:
+              - type: section
+                label: Time Settings
+              - input_datetime.schedule_time_1
+              - input_datetime.schedule_time_2
+              - input_boolean.schedule_monday
+              - input_boolean.schedule_tuesday
+              - input_boolean.schedule_wednesday
+              - input_boolean.schedule_thursday
+              - input_boolean.schedule_friday
+              - input_boolean.schedule_saturday
+              - input_boolean.schedule_sunday
+
+          - type: entities
+            entities:
+              - type: section
+                label: Run Settings
+              - input_number.schedule_duration_minutes
+              - input_number.schedule_volume_liters
+
+          - type: button
+            name: Create Time-Based Schedule
+            icon: mdi:plus-circle
+            tap_action:
+              action: call-service
+              service: script.create_time_based_schedule
+
+      # ========================================
+      # CREATE INTERVAL SCHEDULE
+      # ========================================
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: |
+              ---
+              ### ⏲️ Create Interval Schedule
+              Water automatically every X hours.
+
+          - type: entities
+            entities:
+              - type: section
+                label: Basic Settings
+              - input_text.schedule_name
+              - input_select.schedule_valve
+              - input_select.schedule_run_type
+
+          - type: entities
+            entities:
+              - type: section
+                label: Interval Settings
+              - input_number.schedule_interval_hours
+
+          - type: entities
+            entities:
+              - type: section
+                label: Run Settings
+              - input_number.schedule_duration_minutes
+              - input_number.schedule_volume_liters
+
+          - type: button
+            name: Create Interval Schedule
+            icon: mdi:plus-circle
+            tap_action:
+              action: call-service
+              service: script.create_interval_schedule
+
+      # ========================================
+      # SMART CONDITIONS
+      # ========================================
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: |
+              ---
+              ### 🌦️ Smart Conditions (Optional)
+              Skip watering based on weather or sensors.
+
+          - type: entities
+            entities:
+              - type: section
+                label: Soil Moisture
+              - input_text.schedule_moisture_sensor
+              - input_number.schedule_max_moisture
+
+          - type: entities
+            entities:
+              - type: section
+                label: Temperature
+              - input_number.schedule_min_temp
+              - input_number.schedule_max_temp
+
+          - type: entities
+            entities:
+              - type: section
+                label: Rain Detection
+              - input_boolean.schedule_skip_if_rain
+
+  # ========================================
+  # HISTORY & ANALYTICS TAB
+  # ========================================
+  - title: History
+    path: history
+    icon: mdi:chart-line
+    badges: []
+    cards:
+      - type: markdown
+        content: |
+          ## 📈 Irrigation History & Analytics
+          View past sessions and schedule runs.
+
+      # Total Usage Charts
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: |
+              ### Water Usage Overview
+
+          - type: history-graph
+            entities:
+              - entity: sensor.water_valve_1_total
+                name: Front Garden
+              - entity: sensor.water_valve_2_total
+                name: Lilly Pilly
+              - entity: sensor.water_valve_3_total
+                name: Back Garden
+              - entity: sensor.water_valve_4_total
+                name: Mains Tap
+            hours_to_show: 168
+            refresh_interval: 300
+
+      # Session Statistics
+      - type: horizontal-stack
+        cards:
+          - type: statistic
+            entity: sensor.water_valve_1_session_count
+            name: Front Garden Sessions
+            period:
+              calendar:
+                period: month
+
+          - type: statistic
+            entity: sensor.water_valve_2_session_count
+            name: Lilly Pilly Sessions
+            period:
+              calendar:
+                period: month
+
+          - type: statistic
+            entity: sensor.water_valve_3_session_count
+            name: Back Garden Sessions
+            period:
+              calendar:
+                period: month
+
+          - type: statistic
+            entity: sensor.water_valve_4_session_count
+            name: Mains Tap Sessions
+            period:
+              calendar:
+                period: month
+
+      # Recent Sessions
+      - type: markdown
+        content: |
+          ### Recent Irrigation Sessions
+          View detailed session history in your Supabase database at:
+          `irrigation_sessions` table
+
+      # Schedule Run History
+      - type: markdown
+        content: |
+          ### Schedule Run History
+          View schedule execution history in your Supabase database at:
+          `schedule_runs` table
+
+          **Includes:**
+          - When schedules ran
+          - Why they were skipped
+          - Actual water used
+          - Actual duration
+
+  # ========================================
+  # SETTINGS TAB
+  # ========================================
+  - title: Settings
+    path: settings
+    icon: mdi:cog
+    badges: []
+    cards:
+      - type: markdown
+        content: |
+          ## ⚙️ System Settings
+
+      # System Information
+      - type: entities
+        title: System Information
+        entities:
+          - entity: sensor.water_valve_1_link_quality
+            name: Front Garden Signal
+          - entity: sensor.water_valve_2_link_quality
+            name: Lilly Pilly Signal
+          - entity: sensor.water_valve_3_link_quality
+            name: Back Garden Signal
+          - entity: sensor.water_valve_4_link_quality
+            name: Mains Tap Signal
+
+      # Maintenance Actions
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: |
+              ### Maintenance Actions
+
+          - type: horizontal-stack
+            cards:
+              - type: button
+                name: Reset All Totals
+                icon: mdi:restart
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.reset_totals
+                confirmation:
+                  text: Reset all valve totals and counters?
+
+              - type: button
+                name: Rescan Devices
+                icon: mdi:magnify-scan
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.rescan
+
+      # Database Access
+      - type: markdown
+        content: |
+          ### 💾 Database Access
+
+          Access your Supabase database for advanced queries:
+
+          **Tables:**
+          - `irrigation_sessions` - All watering sessions
+          - `irrigation_schedules` - Schedule configurations
+          - `schedule_runs` - Schedule execution history
+
+          **Supabase Dashboard:** Check your `.env` file for connection details
+
+      # Documentation Links
+      - type: markdown
+        content: |
+          ### 📚 Documentation
+
+          - [Scheduling Guide](https://github.com/Zebra-zzz/z2m-irrigation/blob/main/SCHEDULING.md)
+          - [Installation Guide](https://github.com/Zebra-zzz/z2m-irrigation/blob/main/INSTALLATION.md)
+          - [Issue Tracker](https://github.com/Zebra-zzz/z2m-irrigation/issues)
+
+          **Version:** 2.0.0
