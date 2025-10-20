@@ -150,23 +150,39 @@ class ValveManager:
                 v.total_liters += liters
                 v.total_minutes += dt / 60.0
 
+        # FAILSAFE: Check targets even when valve is ON (not just during session_active)
+        # This ensures we catch cases where device fails to stop
+        if v.state == "ON":
             # FAILSAFE: Check if volume target reached (backup to native device control)
-            if v.target_liters and v.session_liters >= v.target_liters:
-                _LOGGER.warning(
-                    "FAILSAFE: Volume target exceeded for %s: %.2f/%.2f L - forcing OFF",
-                    topic, v.session_liters, v.target_liters
-                )
-                self.hass.async_create_task(self.async_turn_off(topic))
+            if v.target_liters and v.target_liters > 0:
+                if v.session_liters >= v.target_liters:
+                    _LOGGER.warning(
+                        "FAILSAFE: Volume target reached for %s: %.2f/%.2f L - forcing OFF",
+                        topic, v.session_liters, v.target_liters
+                    )
+                    self.hass.async_create_task(self.async_turn_off(topic))
+                    v.target_liters = None  # Clear target to prevent repeated triggers
+                    return
+                else:
+                    # Debug log to see progress
+                    _LOGGER.debug(
+                        "Volume run progress for %s: %.2f/%.2f L (%.1f%%), flow: %.2f L/min",
+                        topic, v.session_liters, v.target_liters,
+                        (v.session_liters / v.target_liters * 100), v.flow_lpm
+                    )
 
             # FAILSAFE: Check if time target reached (backup to native device control)
-            if v.session_end_ts and now >= v.session_end_ts:
-                elapsed_min = (now - v.session_start_ts) / 60.0
-                target_min = (v.session_end_ts - v.session_start_ts) / 60.0
-                _LOGGER.warning(
-                    "FAILSAFE: Time target exceeded for %s: %.2f/%.2f min - forcing OFF",
-                    topic, elapsed_min, target_min
-                )
-                self.hass.async_create_task(self.async_turn_off(topic))
+            if v.session_end_ts and v.session_start_ts > 0:
+                if now >= v.session_end_ts:
+                    elapsed_min = (now - v.session_start_ts) / 60.0
+                    target_min = (v.session_end_ts - v.session_start_ts) / 60.0
+                    _LOGGER.warning(
+                        "FAILSAFE: Time target reached for %s: %.2f/%.2f min - forcing OFF",
+                        topic, elapsed_min, target_min
+                    )
+                    self.hass.async_create_task(self.async_turn_off(topic))
+                    v.session_end_ts = None  # Clear target to prevent repeated triggers
+                    return
 
         # state transitions
         if "state" in data:
@@ -291,7 +307,7 @@ class ValveManager:
         self._dispatch_signal(sig_update(topic or "*"))
 
     def start_liters(self, topic: str, liters: float) -> None:
-        """Start valve for specified liters using native cyclic_quantitative_irrigation"""
+        """Start valve for specified liters - HA monitoring only (device clears native commands)"""
         v = self.valves.get(topic)
         if not v:
             return
@@ -299,25 +315,12 @@ class ValveManager:
         v.session_end_ts = None
         v.trigger_type = "volume"
 
-        _LOGGER.info("Starting volume run: %s for %.2f L (native device control + HA backup)", topic, liters)
+        _LOGGER.info("Starting volume run: %s for %.2f L (HA monitoring)", topic, liters)
 
-        # Use Sonoff SWV's native cyclic_quantitative_irrigation feature
-        # Set total_number=1 for single run, irrigation_interval=0 for immediate start
-        payload = {
-            "cyclic_quantitative_irrigation": {
-                "current_count": 0,
-                "total_number": 1,
-                "irrigation_capacity": int(min(liters, 6500)),  # Max 6500L per device spec
-                "irrigation_interval": 0
-            }
-        }
-        self.hass.async_create_task(
-            mqtt.async_publish(self.hass, f"{self.base}/{topic}/set", json.dumps(payload), qos=1)
-        )
-
-        # FAILSAFE: HA monitors flow in _on_state() callback
-        # If session_liters >= target_liters, will force OFF command
-        # This catches cases where device fails to stop at target
+        # NOTE: Sonoff SWV clears cyclic_quantitative_irrigation immediately after starting
+        # Z2M logs show: device accepts command, starts valve, then clears irrigation_capacity to 0
+        # Therefore we use simple ON/OFF and HA monitors flow to turn off at target
+        self.hass.async_create_task(self.async_turn_on(topic))
 
     def start_timed(self, topic: str, minutes: float) -> None:
         """Start valve for specified minutes using native cyclic_timed_irrigation"""

@@ -2,6 +2,32 @@
 
 All notable changes to the Z2M Irrigation integration will be documented in this file.
 
+## [1.0.2] - 2025-10-20
+
+### 🐛 Critical Fixes - Device Quirk Discovered
+
+#### Device Clears Native Volume Commands
+- **DISCOVERED**: Sonoff SWV clears `cyclic_quantitative_irrigation` immediately after starting
+  - Z2M logs show: device accepts command, sets `current_count:1`, valve turns ON
+  - Then immediately: `irrigation_capacity:0, total_number:0` (program cleared!)
+  - **Solution**: Use simple ON/OFF + HA monitoring for volume runs
+  - Timed runs: Testing needed to see if `cyclic_timed_irrigation` has same issue
+
+#### Failsafe System Fixes
+- **FIXED**: Failsafes now check on EVERY MQTT update, not just during flow integration
+  - Volume failsafe now triggers even if flow stops or is zero
+  - Time failsafe now checks anytime valve is ON with a target time
+  - Added progress logging (DEBUG level) to track volume runs
+  - Failsafes clear targets after triggering to prevent repeated OFF commands
+
+#### Switch State Delay
+- **DOCUMENTED**: Switch entity updates when Z2M publishes state, not instantly
+  - This is normal Zigbee behavior (device → coordinator → Z2M → MQTT → HA)
+  - Typical delay: 1-3 seconds
+  - State eventually syncs correctly
+
+---
+
 ## [1.0.1] - 2025-10-20
 
 ### 🐛 Critical Fixes
