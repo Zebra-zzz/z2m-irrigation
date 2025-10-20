@@ -1,3 +1,5 @@
 {
-  "title": "Z2M Irrigation (Sonoff Valves)"
+  "title": "Z2M Irrigation (Sonoff Valves)",
+  "config": { "step": { "user": { "title": "Set up Z2M Irrigation" } } },
+  "options": { "step": { "init": { "title": "Options" } } }
 }

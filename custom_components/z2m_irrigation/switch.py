@@ -1,55 +1,63 @@
 from __future__ import annotations
+
 from homeassistant.components.switch import SwitchEntity
+from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity import DeviceInfo
 
-from .const import DOMAIN, SIG_NEW_VALVE, SIG_UPDATE_VALVE
+from .manager import ValveManager, Valve
+from .const import DOMAIN, MANUFACTURER, MODEL, SIG_NEW_VALVE, sig_update
 
-def _dev_info(name: str):
-    return {
-        "identifiers": {(DOMAIN, name)},
-        "manufacturer": "Sonoff",
-        "model": "SWV",
-        "name": name,
-    }
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
+    mgr: ValveManager = hass.data[DOMAIN][entry.entry_id]
+
+    def _add(v: Valve):
+        async_add_entities([ValveSwitch(mgr, v)])
+
+    for v in list(mgr.valves.values()):
+        _add(v)
+
+    async_dispatcher_connect(hass, SIG_NEW_VALVE, _add)
 
 class ValveSwitch(SwitchEntity):
     _attr_has_entity_name = True
     _attr_name = "Valve"
 
-    def __init__(self, name: str):
-        self._name = name
+    def __init__(self, mgr: ValveManager, valve: Valve) -> None:
+        self.mgr = mgr
+        self.valve = valve
+        self._sig = sig_update(valve.topic)
+        self._unsub = None
 
     @property
-    def unique_id(self): return f"{self._name}_switch"
+    def unique_id(self) -> str:
+        return f"{self.valve.topic}_switch"
+
     @property
-    def device_info(self): return _dev_info(self._name)
+    def is_on(self) -> bool:
+        return self.valve.state == "ON"
+
     @property
-    def is_on(self):
-        v = self.hass.data[DOMAIN][self.hass.data[DOMAIN+"_entry"]].valves.get(self._name)
-        return False if not v else v.running
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.valve.topic)},
+            manufacturer=MANUFACTURER,
+            model=MODEL,
+            name=self.valve.name,
+        )
 
-    async def async_turn_on(self, **kwargs):
-        await self.hass.data[DOMAIN][self.hass.data[DOMAIN+"_entry"]].turn_on(self._name)
-    async def async_turn_off(self, **kwargs):
-        await self.hass.data[DOMAIN][self.hass.data[DOMAIN+"_entry"]].turn_off(self._name)
+    async def async_added_to_hass(self) -> None:
+        def _cb():
+            self.async_write_ha_state()
+        self._unsub = async_dispatcher_connect(self.hass, self._sig, _cb)
 
-    async def async_added_to_hass(self):
-        self.async_on_remove(async_dispatcher_connect(self.hass, SIG_UPDATE_VALVE, self._maybe_update))
+    async def async_will_remove_from_hass(self) -> None:
+        if self._unsub:
+            self._unsub(); self._unsub = None
 
-    @callback
-    def _maybe_update(self, name: str):
-        if name == self._name: self.async_write_ha_state()
+    async def async_turn_on(self, **kwargs) -> None:
+        await self.mgr.async_turn_on(self.valve.topic)
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
-    hass.data[DOMAIN+"_entry"] = entry.entry_id
-    mgr = hass.data[DOMAIN][entry.entry_id]
-
-    ents = [ValveSwitch(n) for n in mgr.valves.keys()]
-    async_add_entities(ents)
-
-    @callback
-    def _add(name: str):
-        async_add_entities([ValveSwitch(name)])
-    hass.helpers.dispatcher.async_dispatcher_connect(SIG_NEW_VALVE, _add)
+    async def async_turn_off(self, **kwargs) -> None:
+        await self.mgr.async_turn_off(self.valve.topic)
