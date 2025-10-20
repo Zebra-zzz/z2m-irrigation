@@ -2,27 +2,38 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime
-from typing import Optional
-from supabase import create_client, Client
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from supabase import Client
 
 _LOGGER = logging.getLogger(__name__)
 
 class SessionHistory:
     def __init__(self):
         self.client: Optional[Client] = None
+        self._supabase_available = False
         self._init_client()
 
     def _init_client(self):
         try:
+            # Try to import supabase library
+            try:
+                from supabase import create_client
+                self._supabase_available = True
+            except ImportError:
+                _LOGGER.info("Supabase library not available, session history disabled")
+                return
+
             url = os.getenv("VITE_SUPABASE_URL")
             key = os.getenv("VITE_SUPABASE_SUPABASE_ANON_KEY")
             if url and key:
                 self.client = create_client(url, key)
                 _LOGGER.debug("Supabase client initialized for session history")
             else:
-                _LOGGER.warning("Supabase credentials not found, session history disabled")
+                _LOGGER.info("Supabase credentials not found, session history disabled")
         except Exception as e:
-            _LOGGER.error("Failed to initialize Supabase client: %s", e)
+            _LOGGER.warning("Failed to initialize Supabase client: %s", e)
             self.client = None
 
     async def start_session(self, valve_topic: str, valve_name: str, trigger_type: str = "manual", target_value: Optional[float] = None) -> Optional[str]:
