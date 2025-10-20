@@ -19,6 +19,7 @@ from .const import (
     Z2M_MODEL,
     sig_update,
 )
+from .history import SessionHistory
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +38,11 @@ class Valve:
     total_minutes: float = 0.0
     target_liters: Optional[float] = None
     cancel_handle: Optional[Callable[[], None]] = None
+    session_count: int = 0
+    battery: Optional[int] = None
+    link_quality: Optional[int] = None
+    current_session_id: Optional[str] = None  # Track current Supabase session ID
+    trigger_type: str = "manual"  # Track how valve was triggered
 
 class ValveManager:
     def __init__(
@@ -52,6 +58,7 @@ class ValveManager:
         self.flow_scale = float(flow_scale or 1.0)
         self.valves: Dict[str, Valve] = {}
         self._unsubs: list[Callable[[], None]] = []
+        self.history = SessionHistory()
 
     async def async_start(self) -> None:
         _LOGGER.debug("Starting ValveManager base=%s manual=%s scale=%s", self.base, self.manual_topics, self.flow_scale)
@@ -152,17 +159,38 @@ class ValveManager:
                     v.session_active = True
                     v.session_start_ts = now
                     v.session_liters = 0.0
+                    v.session_count += 1
+                    # Log session start to Supabase
+                    target = v.target_liters if v.target_liters else (v.session_end_ts - now) / 60.0 if v.session_end_ts else None
+                    self.hass.async_create_task(
+                        self._log_session_start(v, target)
+                    )
             else:
                 new_state = "OFF"
                 if v.session_active:
+                    session_duration = (now - v.session_start_ts) / 60.0
+                    avg_flow = v.session_liters / session_duration if session_duration > 0 else 0
+                    # Log session end to Supabase
+                    if v.current_session_id:
+                        self.hass.async_create_task(
+                            self.history.end_session(
+                                v.current_session_id,
+                                session_duration,
+                                v.session_liters,
+                                avg_flow
+                            )
+                        )
+                        v.current_session_id = None
                     v.session_active = False
                     v.target_liters = None
                     v.session_end_ts = None
+                    v.trigger_type = "manual"
                     if v.cancel_handle:
                         v.cancel_handle(); v.cancel_handle = None
             v.state = new_state
 
         # flow normalization to L/min
+        # Sonoff SWV reports flow in m³/h, convert to L/min: 1 m³/h = 16.667 L/min
         if "flow_lpm" in data:
             try:
                 v.flow_lpm = float(data["flow_lpm"]) or 0.0
@@ -170,16 +198,33 @@ class ValveManager:
                 v.flow_lpm = 0.0
         elif "flow" in data:
             try:
-                v.flow_lpm = (float(data["flow"]) or 0.0) * getattr(self, "flow_scale", 1.0)
+                raw_flow = float(data["flow"]) or 0.0
+                # Convert m³/h to L/min: multiply by 1000/60 = 16.667
+                v.flow_lpm = raw_flow * 16.667 * getattr(self, "flow_scale", 1.0)
             except Exception:
                 v.flow_lpm = 0.0
 
-        # optional absolute total from device
+        # optional absolute total from device (convert m³ to L if needed)
         if "consumption" in data:
             try:
                 dev_total = float(data["consumption"])
+                # If consumption is in m³, convert to liters
+                if dev_total < 100:  # Likely m³
+                    dev_total = dev_total * 1000
                 if dev_total >= 0 and dev_total > v.total_liters:
                     v.total_liters = dev_total
+            except Exception:
+                pass
+
+        # battery and link quality
+        if "battery" in data:
+            try:
+                v.battery = int(data["battery"])
+            except Exception:
+                pass
+        if "linkquality" in data or "link_quality" in data:
+            try:
+                v.link_quality = int(data.get("linkquality") or data.get("link_quality"))
             except Exception:
                 pass
 
@@ -191,6 +236,16 @@ class ValveManager:
 
         # SAFE dispatcher fire
         self._dispatch_signal(sig_update(topic))
+
+    async def _log_session_start(self, v: Valve, target_value: Optional[float] = None) -> None:
+        """Helper to log session start to Supabase"""
+        session_id = await self.history.start_session(
+            v.topic,
+            v.name,
+            v.trigger_type,
+            target_value
+        )
+        v.current_session_id = session_id
 
     async def async_turn_on(self, topic: str) -> None:
         await mqtt.async_publish(self.hass, f"{self.base}/{topic}/set", json.dumps({"state": "ON"}), qos=1)
@@ -204,12 +259,14 @@ class ValveManager:
                 v.total_liters = 0.0
                 v.total_minutes = 0.0
                 v.session_liters = 0.0
+                v.session_count = 0
         else:
             v = self.valves.get(topic)
             if v:
                 v.total_liters = 0.0
                 v.total_minutes = 0.0
                 v.session_liters = 0.0
+                v.session_count = 0
         # safe wildcard notify
         self._dispatch_signal(sig_update(topic or "*"))
 
@@ -219,6 +276,7 @@ class ValveManager:
             return
         v.target_liters = max(0.0, float(liters))
         v.session_end_ts = None
+        v.trigger_type = "volume"
         self.hass.async_create_task(self.async_turn_on(topic))
 
     def start_timed(self, topic: str, minutes: float) -> None:
@@ -231,6 +289,7 @@ class ValveManager:
         now = time.monotonic()
         run_s = max(0.0, float(minutes)) * 60.0
         v.session_end_ts = now + run_s
+        v.trigger_type = "timed"
 
         async def _off(_):
             await self.async_turn_off(topic)

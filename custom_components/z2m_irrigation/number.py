@@ -17,14 +17,14 @@ async def async_setup_entry(
 ) -> None:
     mgr: ValveManager = hass.data[DOMAIN][entry.entry_id]
 
-    def _add_numbers(valve: Valve):
-        hass.async_create_task(async_add_entities([
+    async def _add_numbers(valve: Valve):
+        await async_add_entities([
             TargetMinutesNumber(mgr, valve),
             TargetLitersNumber(mgr, valve),
-        ], True))
+        ], True)
 
     for valve in list(mgr.valves.values()):
-        _add_numbers(valve)
+        await _add_numbers(valve)
 
     entry.async_on_unload(
         async_dispatcher_connect(hass, SIG_NEW_VALVE, _add_numbers)
@@ -84,7 +84,7 @@ class TargetMinutesNumber(BaseNumber):
     async def async_set_native_value(self, value: float) -> None:
         self._value = value
         self.async_write_ha_state()
-        await self.mgr.start_timed(self.valve.topic, value)
+        self.mgr.start_timed(self.valve.topic, value)
 
 class TargetLitersNumber(BaseNumber):
     _attr_native_min_value = 1
@@ -100,4 +100,4 @@ class TargetLitersNumber(BaseNumber):
     async def async_set_native_value(self, value: float) -> None:
         self._value = value
         self.async_write_ha_state()
-        await self.mgr.start_liters(self.valve.topic, value)
+        self.mgr.start_liters(self.valve.topic, value)

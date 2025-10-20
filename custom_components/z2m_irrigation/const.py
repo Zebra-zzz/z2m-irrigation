@@ -15,7 +15,7 @@ SIG_NEW_VALVE = "z2m_irrigation_new_valve"
 def sig_update(topic: str) -> str:
     return f"z2m_irrigation_update::{topic}"
 
-PLATFORMS = [Platform.SENSOR, Platform.SWITCH]
+PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.NUMBER]
 
 MANUFACTURER = "Sonoff"
 MODEL = "SWV"

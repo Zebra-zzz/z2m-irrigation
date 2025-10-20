@@ -15,6 +15,9 @@ async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
             TotalLiters(mgr, v),
             TotalMinutes(mgr, v),
             SessionRemaining(mgr, v),
+            SessionCount(mgr, v),
+            BatteryLevel(mgr, v),
+            LinkQuality(mgr, v),
         ], True)
     for v in list(mgr.valves.values()):
         await _add_for(v)
@@ -72,3 +75,20 @@ class SessionRemaining(BaseValveSensor):
             return None
         remaining_s = max(0.0, self.valve.session_end_ts - self.valve.last_ts)
         return round(remaining_s / 60.0, 2)
+
+class SessionCount(BaseValveSensor):
+    def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Session Count", None, "total")
+    @property
+    def native_value(self): return self.valve.session_count
+
+class BatteryLevel(BaseValveSensor):
+    def __init__(self, mgr: ValveManager, valve: Valve):
+        super().__init__(mgr, valve, "Battery", "%", None)
+        self._attr_device_class = "battery"
+    @property
+    def native_value(self): return self.valve.battery
+
+class LinkQuality(BaseValveSensor):
+    def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Link Quality", None, None)
+    @property
+    def native_value(self): return self.valve.link_quality
