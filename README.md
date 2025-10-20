@@ -113,12 +113,16 @@ The integration subscribes to Zigbee2MQTT bridge topics:
 
 It identifies Sonoff SWV devices and subscribes to each valve's topic.
 
-### Smart Monitoring & Control
+### Native Device Control with HA Backup
 When you start a timed or volume-based run:
-- **Timed**: Home Assistant sets a timer and automatically turns off the valve when time expires
-- **Volume**: Home Assistant monitors flow in real-time and turns off when target liters reached
+- **Timed**: Sends `cyclic_timed_irrigation` command to device for native control
+  - Device handles shutoff automatically
+  - HA backup timer as failsafe
+- **Volume**: Sends `cyclic_quantitative_irrigation` command to device for native control
+  - Device handles shutoff automatically at target liters
+  - HA monitors flow and will force shutoff if device fails (failsafe)
 
-**Note**: The Sonoff SWV's native timer/volume features are not exposed through Zigbee2MQTT. Home Assistant provides reliable monitoring and control instead.
+**Dual-Layer Safety**: Both native device control AND Home Assistant monitoring ensure reliable operation even if one layer fails.
 
 ### Data Storage
 - **Real-time data**: Tracked in memory for instant updates

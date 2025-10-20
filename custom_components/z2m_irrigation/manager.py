@@ -281,7 +281,7 @@ class ValveManager:
         self._dispatch_signal(sig_update(topic or "*"))
 
     def start_liters(self, topic: str, liters: float) -> None:
-        """Start valve for specified liters with HA-based monitoring"""
+        """Start valve for specified liters using native cyclic_quantitative_irrigation"""
         v = self.valves.get(topic)
         if not v:
             return
@@ -289,14 +289,24 @@ class ValveManager:
         v.session_end_ts = None
         v.trigger_type = "volume"
 
-        _LOGGER.info("Starting volume run: %s for %.2f L (HA monitoring)", topic, liters)
+        _LOGGER.info("Starting volume run: %s for %.2f L (native device control + HA backup)", topic, liters)
 
-        # Sonoff SWV does not support water_consumed parameter via Z2M
-        # Use simple ON and HA will monitor flow and turn off when target reached
-        self.hass.async_create_task(self.async_turn_on(topic))
+        # Use Sonoff SWV's native cyclic_quantitative_irrigation feature
+        # Set total_number=1 for single run, irrigation_interval=0 for immediate start
+        payload = {
+            "cyclic_quantitative_irrigation": {
+                "current_count": 0,
+                "total_number": 1,
+                "irrigation_capacity": int(min(liters, 6500)),  # Max 6500L per device spec
+                "irrigation_interval": 0
+            }
+        }
+        self.hass.async_create_task(
+            mqtt.async_publish(self.hass, f"{self.base}/{topic}/set", json.dumps(payload), qos=1)
+        )
 
     def start_timed(self, topic: str, minutes: float) -> None:
-        """Start valve for specified minutes with HA-based timer"""
+        """Start valve for specified minutes using native cyclic_timed_irrigation"""
         v = self.valves.get(topic)
         if not v:
             return
@@ -308,15 +318,26 @@ class ValveManager:
         v.session_end_ts = now + run_s
         v.trigger_type = "timed"
 
-        _LOGGER.info("Starting timed run: %s for %.2f min (HA timer)", topic, minutes)
+        _LOGGER.info("Starting timed run: %s for %.2f min (native device control + HA backup)", topic, minutes)
 
-        # Sonoff SWV does not support timer parameter via Z2M
-        # Use simple ON and HA timer will turn off when duration reached
-        self.hass.async_create_task(self.async_turn_on(topic))
+        # Use Sonoff SWV's native cyclic_timed_irrigation feature
+        # Set total_number=1 for single run, irrigation_interval=0 for immediate start
+        seconds = int(min(run_s, 86400))  # Max 86400 seconds per device spec
+        payload = {
+            "cyclic_timed_irrigation": {
+                "current_count": 0,
+                "total_number": 1,
+                "irrigation_duration": seconds,
+                "irrigation_interval": 0
+            }
+        }
+        self.hass.async_create_task(
+            mqtt.async_publish(self.hass, f"{self.base}/{topic}/set", json.dumps(payload), qos=1)
+        )
 
-        # Set HA-side timer to turn off
+        # Also set HA-side backup timer in case device doesn't respond
         async def _off(_):
-            _LOGGER.info("Timer expired for %s - turning off", topic)
+            _LOGGER.info("Backup timer expired for %s - turning off", topic)
             await self.async_turn_off(topic)
             if v.cancel_handle:
                 v.cancel_handle(); v.cancel_handle = None
