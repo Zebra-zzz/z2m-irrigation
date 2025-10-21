@@ -16,6 +16,9 @@ async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
             SessionDuration(mgr, v),
             TotalLiters(mgr, v),
             TotalMinutes(mgr, v),
+            LifetimeTotalLiters(mgr, v),
+            LifetimeTotalMinutes(mgr, v),
+            LifetimeSessionCount(mgr, v),
             SessionRemainingTime(mgr, v),
             SessionRemainingLiters(mgr, v),
             SessionCount(mgr, v),
@@ -135,3 +138,18 @@ class LinkQuality(BaseValveSensor):
     def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Link Quality", None, None)
     @property
     def native_value(self): return self.valve.link_quality
+
+class LifetimeTotalLiters(BaseValveSensor):
+    def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Lifetime Total", "L", "total_increasing")
+    @property
+    def native_value(self): return round(self.valve.lifetime_total_liters, 2)
+
+class LifetimeTotalMinutes(BaseValveSensor):
+    def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Lifetime Total Minutes", "min", "total_increasing")
+    @property
+    def native_value(self): return round(self.valve.lifetime_total_minutes, 2)
+
+class LifetimeSessionCount(BaseValveSensor):
+    def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Lifetime Session Count", None, "total")
+    @property
+    def native_value(self): return self.valve.lifetime_session_count

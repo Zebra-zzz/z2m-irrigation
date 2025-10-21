@@ -34,11 +34,14 @@ class Valve:
     session_start_ts: float = 0.0
     session_liters: float = 0.0
     session_end_ts: Optional[float] = None  # for timed runs; remaining time sensor
-    total_liters: float = 0.0
-    total_minutes: float = 0.0
+    total_liters: float = 0.0  # Resettable total
+    total_minutes: float = 0.0  # Resettable total
+    lifetime_total_liters: float = 0.0  # NEVER resets
+    lifetime_total_minutes: float = 0.0  # NEVER resets
+    lifetime_session_count: int = 0  # NEVER resets
     target_liters: Optional[float] = None
     cancel_handle: Optional[Callable[[], None]] = None
-    session_count: int = 0
+    session_count: int = 0  # Resettable count
     battery: Optional[int] = None
     link_quality: Optional[int] = None
     current_session_id: Optional[str] = None  # Track current Supabase session ID
@@ -129,6 +132,18 @@ class ValveManager:
                 )
             )
             _LOGGER.debug("Subscribed to %s/%s", self.base, topic)
+
+            # Load persisted totals from Supabase
+            totals = await self.history.load_valve_totals(topic)
+            v.lifetime_total_liters = totals["lifetime_total_liters"]
+            v.lifetime_total_minutes = totals["lifetime_total_minutes"]
+            v.lifetime_session_count = totals["lifetime_session_count"]
+            v.total_liters = totals["resettable_total_liters"]
+            v.total_minutes = totals["resettable_total_minutes"]
+            v.session_count = totals["resettable_session_count"]
+            _LOGGER.info("Loaded totals for %s: %.2f L lifetime, %.2f L resettable",
+                        name, v.lifetime_total_liters, v.total_liters)
+
         self.hass.async_create_task(_sub())
 
         # announce new valve safely
@@ -210,16 +225,25 @@ class ValveManager:
                 if v.session_active:
                     session_duration = (now - v.session_start_ts) / 60.0
                     avg_flow = v.session_liters / session_duration if session_duration > 0 else 0
-                    # Log session end to Supabase
+                    # Log session end to Supabase and update totals
                     if v.current_session_id:
-                        self._schedule_task(
-                            self.history.end_session(
+                        async def _end_and_sync():
+                            updated_totals = await self.history.end_session(
                                 v.current_session_id,
                                 session_duration,
                                 v.session_liters,
                                 avg_flow
                             )
-                        )
+                            # Sync totals back to valve object
+                            if updated_totals:
+                                v.lifetime_total_liters = updated_totals["lifetime_total_liters"]
+                                v.lifetime_total_minutes = updated_totals["lifetime_total_minutes"]
+                                v.lifetime_session_count = updated_totals["lifetime_session_count"]
+                                v.total_liters = updated_totals["resettable_total_liters"]
+                                v.total_minutes = updated_totals["resettable_total_minutes"]
+                                v.session_count = updated_totals["resettable_session_count"]
+                                self._dispatch_signal(sig_update(v.topic))
+                        self._schedule_task(_end_and_sync())
                         v.current_session_id = None
                     v.session_active = False
                     v.target_liters = None
@@ -292,21 +316,30 @@ class ValveManager:
         await mqtt.async_publish(self.hass, f"{self.base}/{topic}/set", json.dumps({"state": "OFF"}), qos=1)
 
     def reset_totals(self, topic: str | None = None) -> None:
+        """Reset ONLY resettable totals (lifetime totals are preserved)"""
+        async def _reset_in_supabase(v_topic: str):
+            # Reset in Supabase first
+            success = await self.history.reset_resettable_totals(v_topic)
+            if success:
+                # Then sync to in-memory valve object
+                v = self.valves.get(v_topic)
+                if v:
+                    v.total_liters = 0.0
+                    v.total_minutes = 0.0
+                    v.session_liters = 0.0
+                    v.session_count = 0
+                    self._dispatch_signal(sig_update(v_topic))
+                    _LOGGER.info("Reset resettable totals for %s (lifetime preserved: %.2f L)",
+                                v.name, v.lifetime_total_liters)
+
         if topic is None:
+            # Reset all valves
             for v in self.valves.values():
-                v.total_liters = 0.0
-                v.total_minutes = 0.0
-                v.session_liters = 0.0
-                v.session_count = 0
+                self._schedule_task(_reset_in_supabase(v.topic))
         else:
-            v = self.valves.get(topic)
-            if v:
-                v.total_liters = 0.0
-                v.total_minutes = 0.0
-                v.session_liters = 0.0
-                v.session_count = 0
-        # safe wildcard notify
-        self._dispatch_signal(sig_update(topic or "*"))
+            # Reset specific valve
+            if topic in self.valves:
+                self._schedule_task(_reset_in_supabase(topic))
 
     def start_liters(self, topic: str, liters: float) -> None:
         """Start valve for specified liters - HA monitoring only (device clears native commands)"""
