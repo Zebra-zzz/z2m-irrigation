@@ -4,6 +4,7 @@ import os
 from datetime import datetime, date
 from typing import Optional, Dict, Any
 from homeassistant.core import HomeAssistant
+from pathlib import Path
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -13,15 +14,47 @@ class SessionHistory:
     def __init__(self, hass: HomeAssistant):
         self.hass = hass
         self._sessions: Dict[str, Dict[str, Any]] = {}
-        self.supabase_url = os.getenv("SUPABASE_URL")
-        self.supabase_key = os.getenv("SUPABASE_ANON_KEY")
+
+        # Try to load Supabase config from .env file in HA config directory
+        self.supabase_url = None
+        self.supabase_key = None
+
+        # Try multiple methods to get config
+        env_file = Path(hass.config.config_dir) / ".env"
+        _LOGGER.debug(f"Looking for .env file at: {env_file}")
+
+        if env_file.exists():
+            _LOGGER.debug(f"Found .env file, loading Supabase configuration")
+            try:
+                with open(env_file, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith('SUPABASE_URL='):
+                            self.supabase_url = line.split('=', 1)[1].strip()
+                            _LOGGER.debug(f"Loaded SUPABASE_URL: {self.supabase_url}")
+                        elif line.startswith('SUPABASE_ANON_KEY='):
+                            self.supabase_key = line.split('=', 1)[1].strip()
+                            _LOGGER.debug(f"Loaded SUPABASE_ANON_KEY: {self.supabase_key[:20]}...")
+            except Exception as e:
+                _LOGGER.error(f"Error reading .env file: {e}")
+        else:
+            _LOGGER.warning(f".env file not found at {env_file}")
+            # Fallback to environment variables
+            self.supabase_url = os.getenv("SUPABASE_URL")
+            self.supabase_key = os.getenv("SUPABASE_ANON_KEY")
 
         if not self.supabase_url or not self.supabase_key:
-            _LOGGER.warning("Supabase not configured - history will not persist across restarts")
+            _LOGGER.error("❌ Supabase not configured - history will NOT persist across restarts!")
+            _LOGGER.error(f"   Config directory: {hass.config.config_dir}")
+            _LOGGER.error(f"   Expected .env file at: {env_file}")
+            _LOGGER.error(f"   SUPABASE_URL found: {bool(self.supabase_url)}")
+            _LOGGER.error(f"   SUPABASE_ANON_KEY found: {bool(self.supabase_key)}")
             self._persistence_enabled = False
         else:
             self._persistence_enabled = True
-            _LOGGER.info("Session history initialized with Supabase persistence")
+            _LOGGER.info(f"✅ Session history initialized with Supabase persistence")
+            _LOGGER.info(f"   Supabase URL: {self.supabase_url}")
+            _LOGGER.debug(f"   Supabase Key: {self.supabase_key[:20]}...")
 
     async def _supabase_request(self, method: str, table: str, data: Optional[Dict] = None, params: Optional[Dict] = None) -> Optional[Dict]:
         """Make a request to Supabase REST API"""
@@ -62,7 +95,10 @@ class SessionHistory:
 
     async def load_valve_totals(self, valve_topic: str) -> Dict[str, float]:
         """Load persisted totals from Supabase"""
+        _LOGGER.debug(f"🔍 Loading valve totals for: {valve_topic}")
+
         if not self._persistence_enabled:
+            _LOGGER.warning(f"⚠️  Persistence disabled - returning zeros for {valve_topic}")
             return {
                 "lifetime_total_liters": 0,
                 "lifetime_total_minutes": 0,
@@ -80,8 +116,9 @@ class SessionHistory:
 
         if result and len(result) > 0:
             row = result[0]
-            _LOGGER.debug("Loaded persisted totals for %s: %s L, %s min",
-                         valve_topic, row.get("lifetime_total_liters", 0), row.get("lifetime_total_minutes", 0))
+            _LOGGER.info(f"✅ Loaded persisted totals for {valve_topic}:")
+            _LOGGER.info(f"   Lifetime: {row.get('lifetime_total_liters', 0)} L, {row.get('lifetime_total_minutes', 0)} min, {row.get('lifetime_session_count', 0)} sessions")
+            _LOGGER.info(f"   Resettable: {row.get('resettable_total_liters', 0)} L, {row.get('resettable_total_minutes', 0)} min, {row.get('resettable_session_count', 0)} sessions")
             return {
                 "lifetime_total_liters": float(row.get("lifetime_total_liters", 0)),
                 "lifetime_total_minutes": float(row.get("lifetime_total_minutes", 0)),
@@ -91,6 +128,7 @@ class SessionHistory:
                 "resettable_session_count": int(row.get("resettable_session_count", 0)),
             }
 
+        _LOGGER.info(f"ℹ️  No existing totals found for {valve_topic} - starting fresh")
         return {
             "lifetime_total_liters": 0,
             "lifetime_total_minutes": 0,
@@ -199,6 +237,8 @@ class SessionHistory:
                            target_minutes: Optional[float] = None) -> Optional[str]:
         """Start a new irrigation session and log to Supabase"""
         started_at = datetime.utcnow()
+        _LOGGER.info(f"🚿 Starting session for {valve_name} ({valve_topic})")
+        _LOGGER.info(f"   Trigger: {trigger_type}, Target: {target_liters}L / {target_minutes}min")
 
         # Store in-memory for fast access
         session_data = {
@@ -223,22 +263,26 @@ class SessionHistory:
                     "target_minutes": target_minutes,
                     "completed_successfully": False,
                 }
+                _LOGGER.debug(f"📤 Creating session in Supabase: {db_data}")
                 result = await self._supabase_request("POST", "irrigation_sessions", data=db_data)
 
                 if result and len(result) > 0:
                     session_id = result[0]["id"]
                     session_data["session_id"] = session_id
                     self._sessions[session_id] = session_data
-                    _LOGGER.info("Started session %s for %s (%s)", session_id, valve_name, trigger_type)
+                    _LOGGER.info(f"✅ Session created in Supabase: {session_id}")
                     return session_id
+                else:
+                    _LOGGER.error(f"❌ Failed to create session in Supabase - no result returned")
 
             except Exception as e:
-                _LOGGER.error("Failed to start session in Supabase: %s", e)
+                _LOGGER.error(f"❌ Failed to start session in Supabase: {e}", exc_info=True)
 
         # Fallback to in-memory only
         session_id = f"{valve_topic}_{started_at.timestamp()}"
         session_data["session_id"] = session_id
         self._sessions[session_id] = session_data
+        _LOGGER.warning(f"⚠️  Session created in-memory only (no persistence): {session_id}")
         return session_id
 
     async def end_session(self, session_id: str, duration_minutes: float,
@@ -246,8 +290,11 @@ class SessionHistory:
                          completed_successfully: bool = True) -> Optional[Dict[str, float]]:
         """End session and update both Supabase and daily stats
         Returns updated totals for syncing to valve object"""
+        _LOGGER.info(f"🛑 Ending session: {session_id}")
+        _LOGGER.info(f"   Duration: {duration_minutes:.2f} min, Volume: {liters_used:.2f} L, Flow: {flow_rate_avg:.2f} L/min")
+
         if session_id not in self._sessions:
-            _LOGGER.warning("Session %s not found in memory", session_id)
+            _LOGGER.warning(f"⚠️  Session {session_id} not found in memory")
             return None
 
         session = self._sessions[session_id]
@@ -256,6 +303,7 @@ class SessionHistory:
 
         try:
             if self._persistence_enabled:
+                _LOGGER.debug(f"📤 Updating session in Supabase...")
                 # Update session in Supabase
                 update_data = {
                     "ended_at": ended_at.isoformat(),
@@ -271,6 +319,7 @@ class SessionHistory:
                     params={"id": f"eq.{session_id}"}
                 )
 
+                _LOGGER.debug(f"📊 Updating valve totals...")
                 # Update valve totals and get new values
                 updated_totals = await self.update_valve_totals(
                     session["valve_topic"],
@@ -279,6 +328,12 @@ class SessionHistory:
                     duration_minutes
                 )
 
+                if updated_totals:
+                    _LOGGER.info(f"✅ Updated totals:")
+                    _LOGGER.info(f"   Lifetime: {updated_totals['lifetime_total_liters']:.2f} L, {updated_totals['lifetime_total_minutes']:.2f} min")
+                    _LOGGER.info(f"   Resettable: {updated_totals['resettable_total_liters']:.2f} L, {updated_totals['resettable_total_minutes']:.2f} min")
+
+                _LOGGER.debug(f"📈 Updating daily stats...")
                 # Update daily stats
                 await self._update_daily_stats(
                     session["valve_topic"],
@@ -289,14 +344,13 @@ class SessionHistory:
                 )
 
             _LOGGER.info(
-                "Session ended: %s - %.2f min, %.2f L, %.2f L/min avg",
-                session["valve_name"], duration_minutes, liters_used, flow_rate_avg
+                f"✅ Session ended: {session['valve_name']} - {duration_minutes:.2f} min, {liters_used:.2f} L, {flow_rate_avg:.2f} L/min avg"
             )
 
             return updated_totals
 
         except Exception as e:
-            _LOGGER.error("Failed to end session: %s", e)
+            _LOGGER.error(f"❌ Failed to end session: {e}", exc_info=True)
             return None
         finally:
             # Clean up in-memory session
