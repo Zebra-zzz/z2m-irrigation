@@ -9,7 +9,8 @@ from .const import (
     DOMAIN, CONF_BASE_TOPIC, DEFAULT_BASE_TOPIC, CONF_MANUAL_TOPICS, CONF_FLOW_SCALE, DEFAULT_FLOW_SCALE, PLATFORMS,
 )
 from .manager import ValveManager
-from .scheduler import IrrigationScheduler
+# Scheduler temporarily disabled in v3.0.0 - awaiting local database migration
+# from .scheduler import IrrigationScheduler
 
 SERVICE_START_TIMED = "start_timed"
 SERVICE_START_LITERS = "start_liters"
