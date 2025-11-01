@@ -415,7 +415,10 @@ class IrrigationDatabase:
 
                 row = cursor.fetchone()
                 if row:
-                    result = (float(row["total_liters"]), float(row["total_minutes"]))
+                    # Handle potential None values even with COALESCE
+                    total_liters = row["total_liters"] if row["total_liters"] is not None else 0.0
+                    total_minutes = row["total_minutes"] if row["total_minutes"] is not None else 0.0
+                    result = (float(total_liters), float(total_minutes))
                     _LOGGER.debug(f"✅ [24h] Found {valve_topic}: {result[0]:.2f}L, {result[1]:.2f}min")
                     return result
                 _LOGGER.debug(f"ℹ️ [24h] No sessions found for {valve_topic} in last 24h")
@@ -466,7 +469,10 @@ class IrrigationDatabase:
 
                 row = cursor.fetchone()
                 if row:
-                    result = (float(row["total_liters"]), float(row["total_minutes"]))
+                    # Handle potential None values even with COALESCE
+                    total_liters = row["total_liters"] if row["total_liters"] is not None else 0.0
+                    total_minutes = row["total_minutes"] if row["total_minutes"] is not None else 0.0
+                    result = (float(total_liters), float(total_minutes))
                     _LOGGER.debug(f"✅ [7d] Found {valve_topic}: {result[0]:.2f}L, {result[1]:.2f}min")
                     return result
                 _LOGGER.debug(f"ℹ️ [7d] No sessions found for {valve_topic} in last 7 days")
