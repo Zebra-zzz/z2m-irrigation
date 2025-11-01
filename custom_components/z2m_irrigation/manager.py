@@ -19,7 +19,7 @@ from .const import (
     Z2M_MODEL,
     sig_update,
 )
-from .history import SessionHistory
+from .database import IrrigationDatabase
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,12 +39,16 @@ class Valve:
     lifetime_total_liters: float = 0.0  # NEVER resets
     lifetime_total_minutes: float = 0.0  # NEVER resets
     lifetime_session_count: int = 0  # NEVER resets
+    last_24h_liters: float = 0.0  # Last 24 hours
+    last_24h_minutes: float = 0.0  # Last 24 hours
+    last_7d_liters: float = 0.0  # Last 7 days
+    last_7d_minutes: float = 0.0  # Last 7 days
     target_liters: Optional[float] = None
     cancel_handle: Optional[Callable[[], None]] = None
     session_count: int = 0  # Resettable count
     battery: Optional[int] = None
     link_quality: Optional[int] = None
-    current_session_id: Optional[str] = None  # Track current Supabase session ID
+    current_session_id: Optional[str] = None  # Track current session ID
     trigger_type: str = "manual"  # Track how valve was triggered
 
 class ValveManager:
@@ -61,7 +65,7 @@ class ValveManager:
         self.flow_scale = float(flow_scale or 1.0)
         self.valves: Dict[str, Valve] = {}
         self._unsubs: list[Callable[[], None]] = []
-        self.history = SessionHistory(hass)
+        self.db = IrrigationDatabase(hass)
 
     def _schedule_task(self, coro):
         """Schedule an async task from a callback (thread-safe)."""
@@ -71,6 +75,10 @@ class ValveManager:
 
     async def async_start(self) -> None:
         _LOGGER.debug("Starting ValveManager base=%s manual=%s scale=%s", self.base, self.manual_topics, self.flow_scale)
+
+        # Initialize local database
+        await self.db.async_init()
+
         # Subscriptions for device list (two possible topics)
         self._unsubs.append(
             await mqtt.async_subscribe(self.hass, f"{self.base}/bridge/devices", self._on_devices)
@@ -133,16 +141,24 @@ class ValveManager:
             )
             _LOGGER.debug("Subscribed to %s/%s", self.base, topic)
 
-            # Load persisted totals from Supabase
-            totals = await self.history.load_valve_totals(topic)
+            # Load persisted totals from local database
+            totals = await self.db.load_valve_totals(topic)
             v.lifetime_total_liters = totals["lifetime_total_liters"]
             v.lifetime_total_minutes = totals["lifetime_total_minutes"]
             v.lifetime_session_count = totals["lifetime_session_count"]
             v.total_liters = totals["resettable_total_liters"]
             v.total_minutes = totals["resettable_total_minutes"]
             v.session_count = totals["resettable_session_count"]
-            _LOGGER.info("Loaded totals for %s: %.2f L lifetime, %.2f L resettable",
-                        name, v.lifetime_total_liters, v.total_liters)
+
+            # Load time-based metrics
+            last_24h = await self.db.get_usage_last_24h(topic)
+            v.last_24h_liters, v.last_24h_minutes = last_24h
+
+            last_7d = await self.db.get_usage_last_7d(topic)
+            v.last_7d_liters, v.last_7d_minutes = last_7d
+
+            _LOGGER.info("Loaded totals for %s: %.2f L lifetime, %.2f L resettable, %.2f L (24h), %.2f L (7d)",
+                        name, v.lifetime_total_liters, v.total_liters, v.last_24h_liters, v.last_7d_liters)
 
         self.hass.async_create_task(_sub())
 
@@ -225,14 +241,22 @@ class ValveManager:
                 if v.session_active:
                     session_duration = (now - v.session_start_ts) / 60.0
                     avg_flow = v.session_liters / session_duration if session_duration > 0 else 0
-                    # Log session end to Supabase and update totals
+                    # Log session end to local database and update totals
                     if v.current_session_id:
                         async def _end_and_sync():
-                            updated_totals = await self.history.end_session(
+                            # End session in database
+                            await self.db.end_session(
                                 v.current_session_id,
                                 session_duration,
                                 v.session_liters,
                                 avg_flow
+                            )
+                            # Update totals in database
+                            updated_totals = await self.db.save_valve_totals(
+                                v.topic,
+                                v.name,
+                                v.session_liters,
+                                session_duration
                             )
                             # Sync totals back to valve object
                             if updated_totals:
@@ -242,7 +266,15 @@ class ValveManager:
                                 v.total_liters = updated_totals["resettable_total_liters"]
                                 v.total_minutes = updated_totals["resettable_total_minutes"]
                                 v.session_count = updated_totals["resettable_session_count"]
-                                self._dispatch_signal(sig_update(v.topic))
+
+                            # Update time-based metrics
+                            last_24h = await self.db.get_usage_last_24h(v.topic)
+                            v.last_24h_liters, v.last_24h_minutes = last_24h
+
+                            last_7d = await self.db.get_usage_last_7d(v.topic)
+                            v.last_7d_liters, v.last_7d_minutes = last_7d
+
+                            self._dispatch_signal(sig_update(v.topic))
                         self._schedule_task(_end_and_sync())
                         v.current_session_id = None
                     v.session_active = False
@@ -300,12 +332,22 @@ class ValveManager:
         self._dispatch_signal(sig_update(topic))
 
     async def _log_session_start(self, v: Valve, target_value: Optional[float] = None) -> None:
-        """Helper to log session start to Supabase"""
-        session_id = await self.history.start_session(
+        """Helper to log session start to local database"""
+        # Generate unique session ID
+        from datetime import datetime
+        session_id = f"{v.topic}_{datetime.now().timestamp()}"
+
+        # Determine target liters or minutes
+        target_liters = v.target_liters if v.target_liters else None
+        target_minutes = target_value if not v.target_liters and target_value else None
+
+        await self.db.start_session(
+            session_id,
             v.topic,
             v.name,
             v.trigger_type,
-            target_value
+            target_liters,
+            target_minutes
         )
         v.current_session_id = session_id
 
@@ -317,9 +359,9 @@ class ValveManager:
 
     def reset_totals(self, topic: str | None = None) -> None:
         """Reset ONLY resettable totals (lifetime totals are preserved)"""
-        async def _reset_in_supabase(v_topic: str):
-            # Reset in Supabase first
-            success = await self.history.reset_resettable_totals(v_topic)
+        async def _reset_in_database(v_topic: str):
+            # Reset in local database first
+            success = await self.db.reset_resettable_totals(v_topic)
             if success:
                 # Then sync to in-memory valve object
                 v = self.valves.get(v_topic)
@@ -335,11 +377,11 @@ class ValveManager:
         if topic is None:
             # Reset all valves
             for v in self.valves.values():
-                self._schedule_task(_reset_in_supabase(v.topic))
+                self._schedule_task(_reset_in_database(v.topic))
         else:
             # Reset specific valve
             if topic in self.valves:
-                self._schedule_task(_reset_in_supabase(topic))
+                self._schedule_task(_reset_in_database(topic))
 
     def start_liters(self, topic: str, liters: float) -> None:
         """Start valve for specified liters - HA monitoring only (device clears native commands)"""

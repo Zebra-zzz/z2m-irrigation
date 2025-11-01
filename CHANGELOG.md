@@ -2,6 +2,58 @@
 
 All notable changes to the Z2M Irrigation integration will be documented in this file.
 
+## [3.0.0] - 2025-11-01
+
+### 🎉 MAJOR RELEASE - 100% Local Persistence
+
+#### Breaking Changes
+- **Removed Supabase cloud dependency** - All data now stored locally in SQLite
+- No more .env file needed
+- No more external configuration
+- Fully local, no internet required
+
+#### New Features
+
+**Local SQLite Database**
+- All irrigation data stored in `/config/z2m_irrigation.db`
+- Automatic initialization on startup
+- Survives all Home Assistant restarts
+- Auto-cleanup of old sessions (>90 days)
+- Included in Home Assistant backups automatically
+
+**4 New Time-Based Sensors Per Valve**
+- `sensor.xxx_last_24h` - Liters used in last 24 hours
+- `sensor.xxx_last_24h_minutes` - Runtime in last 24 hours
+- `sensor.xxx_last_7_days` - Liters used in last 7 days
+- `sensor.xxx_last_7_days_minutes` - Runtime in last 7 days
+
+**Universal Session Tracking**
+- Tracks ALL valve usage regardless of trigger source:
+  - Integration service calls
+  - Manual switch toggles
+  - Automations
+  - Z2M manual control
+  - Physical valve button
+- Rolling time windows (24h, 7d) update after every session
+- Complete history preserved
+
+#### Improvements
+- Faster startup (no external API calls)
+- Better reliability (no network dependency)
+- Simpler setup (no cloud configuration)
+- Enhanced debug logging with emojis
+- Better performance with indexed queries
+
+#### Migration
+- Existing data from v2.x not migrated (fresh start)
+- All sensors remain compatible
+- No configuration changes needed
+- Just restart Home Assistant!
+
+See `LOCAL-PERSISTENCE-GUIDE.md` for complete documentation.
+
+---
+
 ## [2.0.0] - 2025-10-20
 
 ### 🎉 MAJOR RELEASE - Smart Scheduling System

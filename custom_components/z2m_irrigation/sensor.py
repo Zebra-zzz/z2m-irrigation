@@ -19,6 +19,10 @@ async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
             LifetimeTotalLiters(mgr, v),
             LifetimeTotalMinutes(mgr, v),
             LifetimeSessionCount(mgr, v),
+            Last24hLiters(mgr, v),
+            Last24hMinutes(mgr, v),
+            Last7dLiters(mgr, v),
+            Last7dMinutes(mgr, v),
             SessionRemainingTime(mgr, v),
             SessionRemainingLiters(mgr, v),
             SessionCount(mgr, v),
@@ -153,3 +157,23 @@ class LifetimeSessionCount(BaseValveSensor):
     def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Lifetime Session Count", None, "total")
     @property
     def native_value(self): return self.valve.lifetime_session_count
+
+class Last24hLiters(BaseValveSensor):
+    def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Last 24h", "L", "total")
+    @property
+    def native_value(self): return round(self.valve.last_24h_liters, 2)
+
+class Last24hMinutes(BaseValveSensor):
+    def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Last 24h Minutes", "min", "total")
+    @property
+    def native_value(self): return round(self.valve.last_24h_minutes, 2)
+
+class Last7dLiters(BaseValveSensor):
+    def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Last 7 Days", "L", "total")
+    @property
+    def native_value(self): return round(self.valve.last_7d_liters, 2)
+
+class Last7dMinutes(BaseValveSensor):
+    def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Last 7 Days Minutes", "min", "total")
+    @property
+    def native_value(self): return round(self.valve.last_7d_minutes, 2)
