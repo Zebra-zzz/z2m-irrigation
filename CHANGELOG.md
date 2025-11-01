@@ -13,6 +13,7 @@ All notable changes to the Z2M Irrigation integration will be documented in this
 - Fixed SQLite concurrent access issues by enabling WAL mode
 - Fixed SQLite cursor management - all cursors now properly closed after use
 - Fixed SQLite query handling for NULL results in 24h/7d usage calculations
+- Added comprehensive DEBUG logging for 24h/7d usage tracking (see DEBUGGING-24H-7D.md)
 - Integration now loads successfully even if MQTT connects after integration startup
 
 #### Breaking Changes

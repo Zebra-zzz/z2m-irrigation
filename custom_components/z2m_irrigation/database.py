@@ -377,12 +377,14 @@ class IrrigationDatabase:
     def _get_usage_last_24h_sync(self, valve_topic: str) -> Tuple[float, float]:
         """Synchronous get 24h usage"""
         if not self._conn:
+            _LOGGER.debug(f"🔍 [24h] No database connection for {valve_topic}")
             return (0.0, 0.0)
 
         try:
             cursor = self._conn.cursor()
             try:
                 cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+                _LOGGER.debug(f"🔍 [24h] Querying usage for {valve_topic} since {cutoff}")
 
                 cursor.execute("""
                     SELECT
@@ -396,7 +398,10 @@ class IrrigationDatabase:
 
                 row = cursor.fetchone()
                 if row:
-                    return (float(row["total_liters"]), float(row["total_minutes"]))
+                    result = (float(row["total_liters"]), float(row["total_minutes"]))
+                    _LOGGER.debug(f"✅ [24h] Found {valve_topic}: {result[0]:.2f}L, {result[1]:.2f}min")
+                    return result
+                _LOGGER.debug(f"ℹ️ [24h] No sessions found for {valve_topic} in last 24h")
                 return (0.0, 0.0)
             finally:
                 cursor.close()
@@ -414,12 +419,14 @@ class IrrigationDatabase:
     def _get_usage_last_7d_sync(self, valve_topic: str) -> Tuple[float, float]:
         """Synchronous get 7d usage"""
         if not self._conn:
+            _LOGGER.debug(f"🔍 [7d] No database connection for {valve_topic}")
             return (0.0, 0.0)
 
         try:
             cursor = self._conn.cursor()
             try:
                 cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
+                _LOGGER.debug(f"🔍 [7d] Querying usage for {valve_topic} since {cutoff}")
 
                 cursor.execute("""
                     SELECT
@@ -433,7 +440,10 @@ class IrrigationDatabase:
 
                 row = cursor.fetchone()
                 if row:
-                    return (float(row["total_liters"]), float(row["total_minutes"]))
+                    result = (float(row["total_liters"]), float(row["total_minutes"]))
+                    _LOGGER.debug(f"✅ [7d] Found {valve_topic}: {result[0]:.2f}L, {result[1]:.2f}min")
+                    return result
+                _LOGGER.debug(f"ℹ️ [7d] No sessions found for {valve_topic} in last 7 days")
                 return (0.0, 0.0)
             finally:
                 cursor.close()

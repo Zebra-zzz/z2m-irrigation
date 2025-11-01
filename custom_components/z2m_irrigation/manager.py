@@ -271,11 +271,14 @@ class ValveManager:
                                 v.session_count = updated_totals["resettable_session_count"]
 
                             # Update time-based metrics
+                            _LOGGER.debug(f"🔄 Updating time-based metrics for {v.name}")
                             last_24h = await self.db.get_usage_last_24h(v.topic)
                             v.last_24h_liters, v.last_24h_minutes = last_24h
+                            _LOGGER.debug(f"   24h: {v.last_24h_liters:.2f}L, {v.last_24h_minutes:.2f}min")
 
                             last_7d = await self.db.get_usage_last_7d(v.topic)
                             v.last_7d_liters, v.last_7d_minutes = last_7d
+                            _LOGGER.debug(f"   7d: {v.last_7d_liters:.2f}L, {v.last_7d_minutes:.2f}min")
 
                             self._dispatch_signal(sig_update(v.topic))
                         self._schedule_task(_end_and_sync())
