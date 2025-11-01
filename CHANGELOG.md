@@ -7,6 +7,7 @@ All notable changes to the Z2M Irrigation integration will be documented in this
 ### 🎉 MAJOR RELEASE - 100% Local Persistence
 
 #### Bug Fixes (Latest)
+- **CRITICAL FIX: Sessions not ending properly** - Fixed race condition where `current_session_id` was set AFTER async database save, causing sessions to not be recorded if valve turned off quickly. Now generates session_id immediately when valve turns ON.
 - Fixed MQTT connection timing issue on startup (graceful handling if MQTT not ready)
 - Fixed `async_add_entities` RuntimeError by adding @callback decorator to entity addition functions
 - Fixed missing `_LOGGER` import in `__init__.py`

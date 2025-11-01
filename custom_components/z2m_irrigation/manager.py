@@ -236,11 +236,15 @@ class ValveManager:
                     v.session_start_ts = now
                     v.session_liters = 0.0
                     v.session_count += 1
+                    # Generate session ID immediately before valve can turn off
+                    from datetime import datetime
+                    v.current_session_id = f"{v.topic}_{datetime.now().timestamp()}"
+                    _LOGGER.debug(f"🚿 [MANAGER] Generated session_id: {v.current_session_id}")
                     # Log session start to local database
                     target = v.target_liters if v.target_liters else (v.session_end_ts - now) / 60.0 if v.session_end_ts else None
                     _LOGGER.debug(f"🚿 [MANAGER] Logging session start for {v.name}, target={target}")
                     self._schedule_task(
-                        self._log_session_start(v, target)
+                        self._log_session_start(v, target, v.current_session_id)
                     )
             else:
                 new_state = "OFF"
@@ -343,11 +347,12 @@ class ValveManager:
         # SAFE dispatcher fire
         self._dispatch_signal(sig_update(topic))
 
-    async def _log_session_start(self, v: Valve, target_value: Optional[float] = None) -> None:
+    async def _log_session_start(self, v: Valve, target_value: Optional[float] = None, session_id: str = None) -> None:
         """Helper to log session start to local database"""
-        # Generate unique session ID
-        from datetime import datetime
-        session_id = f"{v.topic}_{datetime.now().timestamp()}"
+        # Session ID should already be set on the valve object
+        if not session_id:
+            _LOGGER.error(f"❌ No session_id provided for {v.name} - this should not happen!")
+            return
 
         # Determine target liters or minutes
         target_liters = v.target_liters if v.target_liters else None
@@ -361,7 +366,6 @@ class ValveManager:
             target_liters,
             target_minutes
         )
-        v.current_session_id = session_id
 
     async def async_turn_on(self, topic: str) -> None:
         await mqtt.async_publish(self.hass, f"{self.base}/{topic}/set", json.dumps({"state": "ON"}), qos=1)
