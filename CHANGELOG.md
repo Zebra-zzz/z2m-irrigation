@@ -6,6 +6,11 @@ All notable changes to the Z2M Irrigation integration will be documented in this
 
 ### 🎉 MAJOR RELEASE - 100% Local Persistence
 
+#### Bug Fixes (Latest)
+- Fixed MQTT connection timing issue on startup (graceful handling if MQTT not ready)
+- Fixed `async_add_entities` TypeError (removed incorrect await statements)
+- Integration now loads successfully even if MQTT connects after integration startup
+
 #### Breaking Changes
 - **Removed Supabase cloud dependency** - All data now stored locally in SQLite
 - **Scheduler temporarily disabled** - Smart schedules require database migration (coming in v3.1.0)

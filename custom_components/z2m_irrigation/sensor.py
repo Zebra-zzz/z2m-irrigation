@@ -9,8 +9,8 @@ from .const import DOMAIN, MANUFACTURER, MODEL, SIG_NEW_VALVE, sig_update
 
 async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
     mgr: ValveManager = hass.data[DOMAIN][entry.entry_id]["manager"]
-    async def _add_for(v: Valve):
-        await async_add_entities([
+    def _add_for(v: Valve):
+        async_add_entities([
             FlowLpm(mgr, v),
             SessionUsed(mgr, v),
             SessionDuration(mgr, v),
@@ -30,7 +30,7 @@ async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
             LinkQuality(mgr, v),
         ], True)
     for v in list(mgr.valves.values()):
-        await _add_for(v)
+        _add_for(v)
     entry.async_on_unload(async_dispatcher_connect(hass, SIG_NEW_VALVE, _add_for))
 
 class BaseValveSensor(SensorEntity):

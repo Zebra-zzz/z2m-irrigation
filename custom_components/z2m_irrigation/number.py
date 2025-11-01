@@ -17,14 +17,14 @@ async def async_setup_entry(
 ) -> None:
     mgr: ValveManager = hass.data[DOMAIN][entry.entry_id]["manager"]
 
-    async def _add_numbers(valve: Valve):
-        await async_add_entities([
+    def _add_numbers(valve: Valve):
+        async_add_entities([
             TargetMinutesNumber(mgr, valve),
             TargetLitersNumber(mgr, valve),
         ], True)
 
     for valve in list(mgr.valves.values()):
-        await _add_numbers(valve)
+        _add_numbers(valve)
 
     entry.async_on_unload(
         async_dispatcher_connect(hass, SIG_NEW_VALVE, _add_numbers)

@@ -90,9 +90,12 @@ class ValveManager:
         for topic in self.manual_topics:
             self._ensure_valve(topic, topic)
 
-        # Ask Z2M to send the device list
-        await mqtt.async_publish(self.hass, f"{self.base}/bridge/config/devices/get", "")
-        _LOGGER.debug("Requested device list on %s/bridge/config/devices/get", self.base)
+        # Ask Z2M to send the device list (ignore if MQTT not ready)
+        try:
+            await mqtt.async_publish(self.hass, f"{self.base}/bridge/config/devices/get", "")
+            _LOGGER.debug("Requested device list on %s/bridge/config/devices/get", self.base)
+        except Exception as e:
+            _LOGGER.warning("Could not request device list (MQTT not ready?): %s - will discover valves from MQTT messages", e)
 
     async def async_stop(self) -> None:
         _LOGGER.debug("Stopping ValveManager")
