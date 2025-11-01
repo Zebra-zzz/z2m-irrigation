@@ -154,6 +154,7 @@ class ValveManager:
             v.session_count = totals["resettable_session_count"]
 
             # Load time-based metrics
+            _LOGGER.debug(f"Loading time-based metrics for topic={repr(topic)} (type={type(topic)})")
             last_24h = await self.db.get_usage_last_24h(topic)
             v.last_24h_liters, v.last_24h_minutes = last_24h
 
@@ -275,6 +276,8 @@ class ValveManager:
 
                             # Update time-based metrics
                             _LOGGER.debug(f"🔄 Updating time-based metrics for {v.name}")
+                            _LOGGER.debug(f"   v.topic={repr(v.topic)} (type={type(v.topic)})")
+
                             last_24h = await self.db.get_usage_last_24h(v.topic)
                             v.last_24h_liters, v.last_24h_minutes = last_24h
                             _LOGGER.debug(f"   24h: {v.last_24h_liters:.2f}L, {v.last_24h_minutes:.2f}min")

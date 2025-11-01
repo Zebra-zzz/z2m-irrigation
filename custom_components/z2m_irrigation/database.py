@@ -396,11 +396,17 @@ class IrrigationDatabase:
             _LOGGER.debug(f"🔍 [24h] No database connection for {valve_topic}")
             return (0.0, 0.0)
 
+        # Validate parameters
+        if not valve_topic or not isinstance(valve_topic, str):
+            _LOGGER.error(f"❌ [24h] Invalid valve_topic: {repr(valve_topic)} (type={type(valve_topic)})")
+            return (0.0, 0.0)
+
         try:
             cursor = self._conn.cursor()
             try:
                 cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
-                _LOGGER.debug(f"🔍 [24h] Querying usage for {valve_topic} since {cutoff}")
+                _LOGGER.debug(f"🔍 [24h] Querying usage for '{valve_topic}' since {cutoff}")
+                _LOGGER.debug(f"🔍 [24h] Parameters: valve_topic={repr(valve_topic)}, cutoff={repr(cutoff)}")
 
                 cursor.execute("""
                     SELECT
@@ -410,7 +416,7 @@ class IrrigationDatabase:
                     WHERE valve_topic = ?
                       AND started_at >= ?
                       AND ended_at IS NOT NULL
-                """, (valve_topic, cutoff))
+                """, (str(valve_topic), str(cutoff)))
 
                 row = cursor.fetchone()
                 if row:
@@ -441,11 +447,17 @@ class IrrigationDatabase:
             _LOGGER.debug(f"🔍 [7d] No database connection for {valve_topic}")
             return (0.0, 0.0)
 
+        # Validate parameters
+        if not valve_topic or not isinstance(valve_topic, str):
+            _LOGGER.error(f"❌ [7d] Invalid valve_topic: {repr(valve_topic)} (type={type(valve_topic)})")
+            return (0.0, 0.0)
+
         try:
             cursor = self._conn.cursor()
             try:
                 cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
-                _LOGGER.debug(f"🔍 [7d] Querying usage for {valve_topic} since {cutoff}")
+                _LOGGER.debug(f"🔍 [7d] Querying usage for '{valve_topic}' since {cutoff}")
+                _LOGGER.debug(f"🔍 [7d] Parameters: valve_topic={repr(valve_topic)}, cutoff={repr(cutoff)}")
 
                 cursor.execute("""
                     SELECT
@@ -455,7 +467,7 @@ class IrrigationDatabase:
                     WHERE valve_topic = ?
                       AND started_at >= ?
                       AND ended_at IS NOT NULL
-                """, (valve_topic, cutoff))
+                """, (str(valve_topic), str(cutoff)))
 
                 row = cursor.fetchone()
                 if row:
