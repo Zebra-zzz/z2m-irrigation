@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import voluptuous as vol
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
@@ -11,6 +12,8 @@ from .const import (
 from .manager import ValveManager
 # Scheduler temporarily disabled in v3.0.0 - awaiting local database migration
 # from .scheduler import IrrigationScheduler
+
+_LOGGER = logging.getLogger(__name__)
 
 SERVICE_START_TIMED = "start_timed"
 SERVICE_START_LITERS = "start_liters"

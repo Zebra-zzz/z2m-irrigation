@@ -105,11 +105,11 @@ class IrrigationDatabase:
         _LOGGER.debug(f"🔍 Loading valve totals for: {valve_topic}")
 
         default_totals = {
-            "lifetime_total_liters": 0,
-            "lifetime_total_minutes": 0,
+            "lifetime_total_liters": 0.0,
+            "lifetime_total_minutes": 0.0,
             "lifetime_session_count": 0,
-            "resettable_total_liters": 0,
-            "resettable_total_minutes": 0,
+            "resettable_total_liters": 0.0,
+            "resettable_total_minutes": 0.0,
             "resettable_session_count": 0,
         }
 
@@ -118,10 +118,16 @@ class IrrigationDatabase:
             return default_totals
 
         try:
+            # Ensure valve_topic is a string
+            valve_topic_str = str(valve_topic) if valve_topic else ""
+            if not valve_topic_str:
+                _LOGGER.warning(f"⚠️ Empty valve_topic provided")
+                return default_totals
+
             cursor = self._conn.cursor()
             cursor.execute(
                 "SELECT * FROM valve_totals WHERE valve_topic = ?",
-                (valve_topic,)
+                (valve_topic_str,)
             )
             row = cursor.fetchone()
 
@@ -143,7 +149,8 @@ class IrrigationDatabase:
             return default_totals
 
         except Exception as e:
-            _LOGGER.error(f"❌ Error loading valve totals: {e}", exc_info=True)
+            _LOGGER.error(f"❌ Error loading valve totals for '{valve_topic}': {e}", exc_info=True)
+            _LOGGER.error(f"   valve_topic type: {type(valve_topic)}, value: {repr(valve_topic)}")
             return default_totals
 
     async def save_valve_totals(self, valve_topic: str, valve_name: str,
