@@ -106,12 +106,9 @@ async def handle_list_schedules(
     msg: dict[str, Any],
 ):
     """Handle list schedules command."""
+    # Scheduler disabled in v3.0.0 - always return empty list
     all_schedules = []
-    for entry_id, data in hass.data[DOMAIN].items():
-        if isinstance(data, dict) and "scheduler" in data:
-            schedules = data["scheduler"].get_all_schedules()
-            all_schedules.extend(schedules.values())
-
+    _LOGGER.warning("Schedules not available - scheduler disabled in v3.0.0")
     connection.send_result(msg["id"], {"schedules": all_schedules})
 
 
@@ -129,15 +126,9 @@ async def handle_get_schedule(
 ):
     """Handle get schedule command."""
     schedule_id = msg["schedule_id"]
-
-    for entry_id, data in hass.data[DOMAIN].items():
-        if isinstance(data, dict) and "scheduler" in data:
-            schedule = data["scheduler"].get_schedule(schedule_id)
-            if schedule:
-                connection.send_result(msg["id"], {"schedule": schedule})
-                return
-
-    connection.send_error(msg["id"], "not_found", "Schedule not found")
+    # Scheduler disabled in v3.0.0
+    _LOGGER.warning(f"Schedule {schedule_id} not available - scheduler disabled in v3.0.0")
+    connection.send_error(msg["id"], "not_found", "Scheduler disabled in v3.0.0")
 
 
 @websocket_api.websocket_command(
@@ -157,21 +148,7 @@ async def handle_list_schedule_runs(
     schedule_id = msg.get("schedule_id")
     limit = msg.get("limit", 50)
 
+    # Scheduler disabled in v3.0.0 - always return empty list
     all_runs = []
-    for entry_id, data in hass.data[DOMAIN].items():
-        if isinstance(data, dict) and "scheduler" in data:
-            scheduler = data["scheduler"]
-            try:
-                query = scheduler.history.supabase.table("schedule_runs").select("*")
-
-                if schedule_id:
-                    query = query.eq("schedule_id", schedule_id)
-
-                result = await query.order("started_at", desc=True).limit(limit).execute()
-
-                if result.data:
-                    all_runs.extend(result.data)
-            except Exception as e:
-                _LOGGER.error("Failed to fetch schedule runs: %s", e)
-
+    _LOGGER.warning("Schedule runs not available - scheduler disabled in v3.0.0")
     connection.send_result(msg["id"], {"runs": all_runs})

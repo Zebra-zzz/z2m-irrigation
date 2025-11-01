@@ -231,7 +231,7 @@ class ValveManager:
                     v.session_start_ts = now
                     v.session_liters = 0.0
                     v.session_count += 1
-                    # Log session start to Supabase
+                    # Log session start to local database
                     target = v.target_liters if v.target_liters else (v.session_end_ts - now) / 60.0 if v.session_end_ts else None
                     self._schedule_task(
                         self._log_session_start(v, target)

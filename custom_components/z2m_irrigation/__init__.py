@@ -67,9 +67,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     flow_scale = float(entry.options.get(CONF_FLOW_SCALE, DEFAULT_FLOW_SCALE))
     mgr = ValveManager(hass, base, manual, flow_scale)
 
-    # Note: Scheduler requires Supabase and is currently disabled in v3.0.0
+    # Note: Scheduler is temporarily disabled in v3.0.0 pending local database migration
     # Core irrigation tracking works 100% locally with SQLite
-    # Scheduler will be updated to use local database in future release
+    # Scheduler will be re-enabled with local SQLite storage in v3.1.0
+    # Use Home Assistant automations for scheduling in the meantime
     scheduler = None
 
     hass.data[DOMAIN][entry.entry_id] = {"manager": mgr, "scheduler": scheduler}
