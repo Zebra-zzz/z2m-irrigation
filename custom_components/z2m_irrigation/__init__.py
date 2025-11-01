@@ -66,7 +66,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     manual = [s.strip() for s in (entry.options.get(CONF_MANUAL_TOPICS, "") or "").splitlines() if s.strip()]
     flow_scale = float(entry.options.get(CONF_FLOW_SCALE, DEFAULT_FLOW_SCALE))
     mgr = ValveManager(hass, base, manual, flow_scale)
-    scheduler = IrrigationScheduler(hass, mgr.history, mgr)
+
+    # Note: Scheduler requires Supabase and is currently disabled in v3.0.0
+    # Core irrigation tracking works 100% locally with SQLite
+    # Scheduler will be updated to use local database in future release
+    scheduler = None
+
     hass.data[DOMAIN][entry.entry_id] = {"manager": mgr, "scheduler": scheduler}
 
     async def _start_timed(call):
@@ -83,11 +88,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await mgr.async_start()
 
     async def _create_schedule(call):
+        if scheduler is None:
+            _LOGGER.error("Scheduler is disabled in v3.0.0 (requires local database migration)")
+            return
         data = dict(call.data)
         data["valve_topic"] = data.pop("valve")
         await scheduler.add_schedule(data)
 
     async def _update_schedule(call):
+        if scheduler is None:
+            _LOGGER.error("Scheduler is disabled in v3.0.0 (requires local database migration)")
+            return
         schedule_id = call.data["schedule_id"]
         data = {k: v for k, v in call.data.items() if k != "schedule_id"}
         if "valve" in data:
@@ -95,18 +106,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await scheduler.update_schedule(schedule_id, data)
 
     async def _delete_schedule(call):
+        if scheduler is None:
+            _LOGGER.error("Scheduler is disabled in v3.0.0 (requires local database migration)")
+            return
         await scheduler.delete_schedule(call.data["schedule_id"])
 
     async def _enable_schedule(call):
+        if scheduler is None:
+            _LOGGER.error("Scheduler is disabled in v3.0.0 (requires local database migration)")
+            return
         await scheduler.update_schedule(call.data["schedule_id"], {"enabled": True})
 
     async def _disable_schedule(call):
+        if scheduler is None:
+            _LOGGER.error("Scheduler is disabled in v3.0.0 (requires local database migration)")
+            return
         await scheduler.update_schedule(call.data["schedule_id"], {"enabled": False})
 
     async def _run_schedule(call):
+        if scheduler is None:
+            _LOGGER.error("Scheduler is disabled in v3.0.0 (requires local database migration)")
+            return
         await scheduler._execute_schedule(call.data["schedule_id"])
 
     async def _reload_schedules(call):
+        if scheduler is None:
+            _LOGGER.error("Scheduler is disabled in v3.0.0 (requires local database migration)")
+            return
         await scheduler.reload_schedules()
 
     hass.services.async_register(DOMAIN, SERVICE_START_TIMED, _start_timed, SCHEMA_START_TIMED)
@@ -123,7 +149,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     await mgr.async_start()
-    await scheduler.async_start()
+    if scheduler is not None:
+        await scheduler.async_start()
+    else:
+        _LOGGER.warning("⚠️  Scheduler disabled in v3.0.0 - core irrigation tracking works fully locally")
 
     async def _options_updated(hass: HomeAssistant, changed_entry: ConfigEntry) -> None:
         if changed_entry.entry_id != entry.entry_id:
@@ -140,9 +169,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     data = hass.data[DOMAIN][entry.entry_id]
     mgr: ValveManager = data["manager"]
-    scheduler: IrrigationScheduler = data["scheduler"]
+    scheduler = data.get("scheduler")
     await mgr.async_stop()
-    await scheduler.async_stop()
+    if scheduler is not None:
+        await scheduler.async_stop()
     ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)

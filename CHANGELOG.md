@@ -8,6 +8,9 @@ All notable changes to the Z2M Irrigation integration will be documented in this
 
 #### Breaking Changes
 - **Removed Supabase cloud dependency** - All data now stored locally in SQLite
+- **Scheduler temporarily disabled** - Smart schedules require database migration (coming in v3.1.0)
+  - Manual watering via services (`start_liters`, `start_timed`) works perfectly
+  - Use automations for scheduling in the meantime
 - No more .env file needed
 - No more external configuration
 - Fully local, no internet required
