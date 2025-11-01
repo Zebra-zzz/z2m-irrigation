@@ -16,6 +16,7 @@ All notable changes to the Z2M Irrigation integration will be documented in this
   - Using `connection.execute()` directly instead of creating cursors (better thread safety in Home Assistant's executor)
   - Adding explicit string conversion for all parameters
   - Adding parameter validation and type checking
+  - **Added threading.Lock to protect all database operations** - prevents race conditions in Home Assistant's executor thread pool
 - **Added COMPLETE debug logging** - Every database operation, manager action, and session tracked with ➡️/⬅️ arrows (see DEBUGGING-24H-7D.md)
 - Integration now loads successfully even if MQTT connects after integration startup
 

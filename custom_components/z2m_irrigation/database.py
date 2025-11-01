@@ -2,6 +2,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import asyncio
+import threading
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Tuple
 from pathlib import Path
@@ -16,6 +17,7 @@ class IrrigationDatabase:
         self.hass = hass
         self.db_path = Path(hass.config.config_dir) / "z2m_irrigation.db"
         self._conn: Optional[sqlite3.Connection] = None
+        self._lock = threading.Lock()  # Protect database operations
         _LOGGER.info(f"💾 Irrigation database: {self.db_path}")
 
     async def async_init(self):
@@ -129,46 +131,47 @@ class IrrigationDatabase:
             _LOGGER.warning(f"⚠️ Database not initialized - returning zeros")
             return default_totals
 
-        try:
-            # Ensure valve_topic is a string
-            valve_topic_str = str(valve_topic) if valve_topic else ""
-            if not valve_topic_str:
-                _LOGGER.warning(f"⚠️ Empty valve_topic provided")
-                return default_totals
-
-            _LOGGER.debug(f"🔍 Creating cursor for valve_topic='{valve_topic_str}'")
-
-            # Use connection.execute instead of cursor for better thread safety
-            cursor = self._conn.execute(
-                "SELECT * FROM valve_totals WHERE valve_topic = ?",
-                (valve_topic_str,)
-            )
-            try:
-                row = cursor.fetchone()
-
-                if row:
-                    totals = {
-                        "lifetime_total_liters": float(row["lifetime_total_liters"]),
-                        "lifetime_total_minutes": float(row["lifetime_total_minutes"]),
-                        "lifetime_session_count": int(row["lifetime_session_count"]),
-                        "resettable_total_liters": float(row["resettable_total_liters"]),
-                        "resettable_total_minutes": float(row["resettable_total_minutes"]),
-                        "resettable_session_count": int(row["resettable_session_count"]),
-                    }
-                    _LOGGER.info(f"✅ Loaded totals for {valve_topic}:")
-                    _LOGGER.info(f"   Lifetime: {totals['lifetime_total_liters']:.2f} L, {totals['lifetime_total_minutes']:.2f} min")
-                    _LOGGER.info(f"   Resettable: {totals['resettable_total_liters']:.2f} L, {totals['resettable_total_minutes']:.2f} min")
-                    return totals
-
-                _LOGGER.info(f"ℹ️ No existing totals found for {valve_topic} - starting fresh")
-                return default_totals
-            finally:
-                cursor.close()
-
-        except Exception as e:
-            _LOGGER.error(f"❌ Error loading valve totals for '{valve_topic}': {e}", exc_info=True)
-            _LOGGER.error(f"   valve_topic type: {type(valve_topic)}, value: {repr(valve_topic)}")
+        # Ensure valve_topic is a string
+        valve_topic_str = str(valve_topic) if valve_topic else ""
+        if not valve_topic_str:
+            _LOGGER.warning(f"⚠️ Empty valve_topic provided")
             return default_totals
+
+        with self._lock:
+            try:
+                _LOGGER.debug(f"🔍 Creating cursor for valve_topic='{valve_topic_str}'")
+
+                # Use connection.execute instead of cursor for better thread safety
+                cursor = self._conn.execute(
+                    "SELECT * FROM valve_totals WHERE valve_topic = ?",
+                    (valve_topic_str,)
+                )
+                try:
+                    row = cursor.fetchone()
+
+                    if row:
+                        totals = {
+                            "lifetime_total_liters": float(row["lifetime_total_liters"]),
+                            "lifetime_total_minutes": float(row["lifetime_total_minutes"]),
+                            "lifetime_session_count": int(row["lifetime_session_count"]),
+                            "resettable_total_liters": float(row["resettable_total_liters"]),
+                            "resettable_total_minutes": float(row["resettable_total_minutes"]),
+                            "resettable_session_count": int(row["resettable_session_count"]),
+                        }
+                        _LOGGER.info(f"✅ Loaded totals for {valve_topic}:")
+                        _LOGGER.info(f"   Lifetime: {totals['lifetime_total_liters']:.2f} L, {totals['lifetime_total_minutes']:.2f} min")
+                        _LOGGER.info(f"   Resettable: {totals['resettable_total_liters']:.2f} L, {totals['resettable_total_minutes']:.2f} min")
+                        return totals
+
+                    _LOGGER.info(f"ℹ️ No existing totals found for {valve_topic} - starting fresh")
+                    return default_totals
+                finally:
+                    cursor.close()
+
+            except Exception as e:
+                _LOGGER.error(f"❌ Error loading valve totals for '{valve_topic}': {e}", exc_info=True)
+                _LOGGER.error(f"   valve_topic type: {type(valve_topic)}, value: {repr(valve_topic)}")
+                return default_totals
 
     async def save_valve_totals(self, valve_topic: str, valve_name: str,
                                 liters: float, minutes: float) -> Optional[Dict[str, float]]:
@@ -187,83 +190,84 @@ class IrrigationDatabase:
         if not self._conn:
             return None
 
-        try:
-            # Use connection.execute for better thread safety
-            cursor = self._conn.execute(
-                "SELECT * FROM valve_totals WHERE valve_topic = ?",
-                (str(valve_topic),)
-            )
+        with self._lock:
             try:
-                existing = cursor.fetchone()
+                # Use connection.execute for better thread safety
+                cursor = self._conn.execute(
+                    "SELECT * FROM valve_totals WHERE valve_topic = ?",
+                    (str(valve_topic),)
+                )
+                try:
+                    existing = cursor.fetchone()
 
-                if existing:
-                    # Update existing record
-                    new_totals = {
-                        "lifetime_total_liters": float(existing["lifetime_total_liters"]) + liters,
-                        "lifetime_total_minutes": float(existing["lifetime_total_minutes"]) + minutes,
-                        "lifetime_session_count": int(existing["lifetime_session_count"]) + 1,
-                        "resettable_total_liters": float(existing["resettable_total_liters"]) + liters,
-                        "resettable_total_minutes": float(existing["resettable_total_minutes"]) + minutes,
-                        "resettable_session_count": int(existing["resettable_session_count"]) + 1,
-                    }
+                    if existing:
+                        # Update existing record
+                        new_totals = {
+                            "lifetime_total_liters": float(existing["lifetime_total_liters"]) + liters,
+                            "lifetime_total_minutes": float(existing["lifetime_total_minutes"]) + minutes,
+                            "lifetime_session_count": int(existing["lifetime_session_count"]) + 1,
+                            "resettable_total_liters": float(existing["resettable_total_liters"]) + liters,
+                            "resettable_total_minutes": float(existing["resettable_total_minutes"]) + minutes,
+                            "resettable_session_count": int(existing["resettable_session_count"]) + 1,
+                        }
 
-                    cursor.execute("""
-                        UPDATE valve_totals
-                        SET valve_name = ?,
-                            lifetime_total_liters = ?,
-                            lifetime_total_minutes = ?,
-                            lifetime_session_count = ?,
-                            resettable_total_liters = ?,
-                            resettable_total_minutes = ?,
-                            resettable_session_count = ?,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE valve_topic = ?
-                    """, (
-                        valve_name,
-                        new_totals["lifetime_total_liters"],
-                        new_totals["lifetime_total_minutes"],
-                        new_totals["lifetime_session_count"],
-                        new_totals["resettable_total_liters"],
-                        new_totals["resettable_total_minutes"],
-                        new_totals["resettable_session_count"],
-                        valve_topic
-                    ))
-                else:
-                    # Insert new record
-                    new_totals = {
-                        "lifetime_total_liters": liters,
-                        "lifetime_total_minutes": minutes,
-                        "lifetime_session_count": 1,
-                        "resettable_total_liters": liters,
-                        "resettable_total_minutes": minutes,
-                        "resettable_session_count": 1,
-                    }
+                        cursor.execute("""
+                            UPDATE valve_totals
+                            SET valve_name = ?,
+                                lifetime_total_liters = ?,
+                                lifetime_total_minutes = ?,
+                                lifetime_session_count = ?,
+                                resettable_total_liters = ?,
+                                resettable_total_minutes = ?,
+                                resettable_session_count = ?,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE valve_topic = ?
+                        """, (
+                            valve_name,
+                            new_totals["lifetime_total_liters"],
+                            new_totals["lifetime_total_minutes"],
+                            new_totals["lifetime_session_count"],
+                            new_totals["resettable_total_liters"],
+                            new_totals["resettable_total_minutes"],
+                            new_totals["resettable_session_count"],
+                            valve_topic
+                        ))
+                    else:
+                        # Insert new record
+                        new_totals = {
+                            "lifetime_total_liters": liters,
+                            "lifetime_total_minutes": minutes,
+                            "lifetime_session_count": 1,
+                            "resettable_total_liters": liters,
+                            "resettable_total_minutes": minutes,
+                            "resettable_session_count": 1,
+                        }
 
-                    cursor.execute("""
-                        INSERT INTO valve_totals
-                        (valve_topic, valve_name, lifetime_total_liters, lifetime_total_minutes,
-                         lifetime_session_count, resettable_total_liters, resettable_total_minutes,
-                         resettable_session_count)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        valve_topic, valve_name,
-                        new_totals["lifetime_total_liters"],
-                        new_totals["lifetime_total_minutes"],
-                        new_totals["lifetime_session_count"],
-                        new_totals["resettable_total_liters"],
-                        new_totals["resettable_total_minutes"],
-                        new_totals["resettable_session_count"]
-                    ))
+                        cursor.execute("""
+                            INSERT INTO valve_totals
+                            (valve_topic, valve_name, lifetime_total_liters, lifetime_total_minutes,
+                             lifetime_session_count, resettable_total_liters, resettable_total_minutes,
+                             resettable_session_count)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            valve_topic, valve_name,
+                            new_totals["lifetime_total_liters"],
+                            new_totals["lifetime_total_minutes"],
+                            new_totals["lifetime_session_count"],
+                            new_totals["resettable_total_liters"],
+                            new_totals["resettable_total_minutes"],
+                            new_totals["resettable_session_count"]
+                        ))
 
-                self._conn.commit()
-                _LOGGER.debug(f"💾 Saved totals for {valve_topic}: +{liters:.2f}L, +{minutes:.2f}min")
-                return new_totals
-            finally:
-                cursor.close()
+                    self._conn.commit()
+                    _LOGGER.debug(f"💾 Saved totals for {valve_topic}: +{liters:.2f}L, +{minutes:.2f}min")
+                    return new_totals
+                finally:
+                    cursor.close()
 
-        except Exception as e:
-            _LOGGER.error(f"❌ Error saving valve totals: {e}", exc_info=True)
-            return None
+            except Exception as e:
+                _LOGGER.error(f"❌ Error saving valve totals: {e}", exc_info=True)
+                return None
 
     async def reset_resettable_totals(self, valve_topic: str) -> bool:
         """Reset only resettable totals (preserve lifetime)"""
@@ -318,25 +322,26 @@ class IrrigationDatabase:
         if not self._conn:
             return False
 
-        try:
-            started_at = datetime.utcnow().isoformat()
+        with self._lock:
+            try:
+                started_at = datetime.utcnow().isoformat()
 
-            # Use connection.execute for better thread safety
-            self._conn.execute("""
-                INSERT INTO sessions
-                (session_id, valve_topic, valve_name, started_at, trigger_type,
-                 target_liters, target_minutes, completed_successfully)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-            """, (str(session_id), str(valve_topic), str(valve_name), str(started_at), str(trigger_type),
-                  target_liters, target_minutes))
+                # Use connection.execute for better thread safety
+                self._conn.execute("""
+                    INSERT INTO sessions
+                    (session_id, valve_topic, valve_name, started_at, trigger_type,
+                     target_liters, target_minutes, completed_successfully)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+                """, (str(session_id), str(valve_topic), str(valve_name), str(started_at), str(trigger_type),
+                      target_liters, target_minutes))
 
-            self._conn.commit()
-            _LOGGER.info(f"🚿 Session started: {session_id} for {valve_name}")
-            return True
+                self._conn.commit()
+                _LOGGER.info(f"🚿 Session started: {session_id} for {valve_name}")
+                return True
 
-        except Exception as e:
-            _LOGGER.error(f"❌ Error starting session: {e}", exc_info=True)
-            return False
+            except Exception as e:
+                _LOGGER.error(f"❌ Error starting session: {e}", exc_info=True)
+                return False
 
     async def end_session(self, session_id: str, duration_minutes: float,
                          volume_liters: float, avg_flow_rate: float) -> bool:
@@ -354,27 +359,28 @@ class IrrigationDatabase:
         if not self._conn:
             return False
 
-        try:
-            ended_at = datetime.utcnow().isoformat()
+        with self._lock:
+            try:
+                ended_at = datetime.utcnow().isoformat()
 
-            # Use connection.execute for better thread safety
-            self._conn.execute("""
-                UPDATE sessions
-                SET ended_at = ?,
-                    duration_minutes = ?,
-                    volume_liters = ?,
-                    avg_flow_rate = ?,
-                    completed_successfully = 1
-                WHERE session_id = ?
-            """, (str(ended_at), duration_minutes, volume_liters, avg_flow_rate, str(session_id)))
+                # Use connection.execute for better thread safety
+                self._conn.execute("""
+                    UPDATE sessions
+                    SET ended_at = ?,
+                        duration_minutes = ?,
+                        volume_liters = ?,
+                        avg_flow_rate = ?,
+                        completed_successfully = 1
+                    WHERE session_id = ?
+                """, (str(ended_at), duration_minutes, volume_liters, avg_flow_rate, str(session_id)))
 
-            self._conn.commit()
-            _LOGGER.info(f"🛑 Session ended: {session_id} - {duration_minutes:.2f}min, {volume_liters:.2f}L")
-            return True
+                self._conn.commit()
+                _LOGGER.info(f"🛑 Session ended: {session_id} - {duration_minutes:.2f}min, {volume_liters:.2f}L")
+                return True
 
-        except Exception as e:
-            _LOGGER.error(f"❌ Error ending session: {e}", exc_info=True)
-            return False
+            except Exception as e:
+                _LOGGER.error(f"❌ Error ending session: {e}", exc_info=True)
+                return False
 
     async def get_usage_last_24h(self, valve_topic: str) -> Tuple[float, float]:
         """Get liters and minutes used in last 24 hours"""
@@ -396,39 +402,39 @@ class IrrigationDatabase:
             _LOGGER.error(f"❌ [24h] Invalid valve_topic: {repr(valve_topic)} (type={type(valve_topic)})")
             return (0.0, 0.0)
 
-        try:
-            cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
-            _LOGGER.debug(f"🔍 [24h] Querying usage for '{valve_topic}' since {cutoff}")
-            _LOGGER.debug(f"🔍 [24h] Parameters: valve_topic={repr(valve_topic)}, cutoff={repr(cutoff)}")
-
-            # Use connection.execute for better thread safety
-            cursor = self._conn.execute("""
-                SELECT
-                    COALESCE(SUM(volume_liters), 0) as total_liters,
-                    COALESCE(SUM(duration_minutes), 0) as total_minutes
-                FROM sessions
-                WHERE valve_topic = ?
-                  AND started_at >= ?
-                  AND ended_at IS NOT NULL
-            """, (str(valve_topic), str(cutoff)))
+        with self._lock:
             try:
+                cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+                _LOGGER.debug(f"🔍 [24h] Querying usage for '{valve_topic}' since {cutoff}")
+                _LOGGER.debug(f"🔍 [24h] Parameters: valve_topic={repr(valve_topic)}, cutoff={repr(cutoff)}")
 
-                row = cursor.fetchone()
-                if row:
-                    # Handle potential None values even with COALESCE
-                    total_liters = row["total_liters"] if row["total_liters"] is not None else 0.0
-                    total_minutes = row["total_minutes"] if row["total_minutes"] is not None else 0.0
-                    result = (float(total_liters), float(total_minutes))
-                    _LOGGER.debug(f"✅ [24h] Found {valve_topic}: {result[0]:.2f}L, {result[1]:.2f}min")
-                    return result
-                _LOGGER.debug(f"ℹ️ [24h] No sessions found for {valve_topic} in last 24h")
+                # Use connection.execute for better thread safety
+                cursor = self._conn.execute("""
+                    SELECT
+                        COALESCE(SUM(volume_liters), 0) as total_liters,
+                        COALESCE(SUM(duration_minutes), 0) as total_minutes
+                    FROM sessions
+                    WHERE valve_topic = ?
+                      AND started_at >= ?
+                      AND ended_at IS NOT NULL
+                """, (str(valve_topic), str(cutoff)))
+                try:
+                    row = cursor.fetchone()
+                    if row:
+                        # Handle potential None values even with COALESCE
+                        total_liters = row["total_liters"] if row["total_liters"] is not None else 0.0
+                        total_minutes = row["total_minutes"] if row["total_minutes"] is not None else 0.0
+                        result = (float(total_liters), float(total_minutes))
+                        _LOGGER.debug(f"✅ [24h] Found {valve_topic}: {result[0]:.2f}L, {result[1]:.2f}min")
+                        return result
+                    _LOGGER.debug(f"ℹ️ [24h] No sessions found for {valve_topic} in last 24h")
+                    return (0.0, 0.0)
+                finally:
+                    cursor.close()
+
+            except Exception as e:
+                _LOGGER.error(f"❌ Error getting 24h usage: {e}", exc_info=True)
                 return (0.0, 0.0)
-            finally:
-                cursor.close()
-
-        except Exception as e:
-            _LOGGER.error(f"❌ Error getting 24h usage: {e}", exc_info=True)
-            return (0.0, 0.0)
 
     async def get_usage_last_7d(self, valve_topic: str) -> Tuple[float, float]:
         """Get liters and minutes used in last 7 days"""
@@ -450,39 +456,39 @@ class IrrigationDatabase:
             _LOGGER.error(f"❌ [7d] Invalid valve_topic: {repr(valve_topic)} (type={type(valve_topic)})")
             return (0.0, 0.0)
 
-        try:
-            cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
-            _LOGGER.debug(f"🔍 [7d] Querying usage for '{valve_topic}' since {cutoff}")
-            _LOGGER.debug(f"🔍 [7d] Parameters: valve_topic={repr(valve_topic)}, cutoff={repr(cutoff)}")
-
-            # Use connection.execute for better thread safety
-            cursor = self._conn.execute("""
-                SELECT
-                    COALESCE(SUM(volume_liters), 0) as total_liters,
-                    COALESCE(SUM(duration_minutes), 0) as total_minutes
-                FROM sessions
-                WHERE valve_topic = ?
-                  AND started_at >= ?
-                  AND ended_at IS NOT NULL
-            """, (str(valve_topic), str(cutoff)))
+        with self._lock:
             try:
+                cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
+                _LOGGER.debug(f"🔍 [7d] Querying usage for '{valve_topic}' since {cutoff}")
+                _LOGGER.debug(f"🔍 [7d] Parameters: valve_topic={repr(valve_topic)}, cutoff={repr(cutoff)}")
 
-                row = cursor.fetchone()
-                if row:
-                    # Handle potential None values even with COALESCE
-                    total_liters = row["total_liters"] if row["total_liters"] is not None else 0.0
-                    total_minutes = row["total_minutes"] if row["total_minutes"] is not None else 0.0
-                    result = (float(total_liters), float(total_minutes))
-                    _LOGGER.debug(f"✅ [7d] Found {valve_topic}: {result[0]:.2f}L, {result[1]:.2f}min")
-                    return result
-                _LOGGER.debug(f"ℹ️ [7d] No sessions found for {valve_topic} in last 7 days")
+                # Use connection.execute for better thread safety
+                cursor = self._conn.execute("""
+                    SELECT
+                        COALESCE(SUM(volume_liters), 0) as total_liters,
+                        COALESCE(SUM(duration_minutes), 0) as total_minutes
+                    FROM sessions
+                    WHERE valve_topic = ?
+                      AND started_at >= ?
+                      AND ended_at IS NOT NULL
+                """, (str(valve_topic), str(cutoff)))
+                try:
+                    row = cursor.fetchone()
+                    if row:
+                        # Handle potential None values even with COALESCE
+                        total_liters = row["total_liters"] if row["total_liters"] is not None else 0.0
+                        total_minutes = row["total_minutes"] if row["total_minutes"] is not None else 0.0
+                        result = (float(total_liters), float(total_minutes))
+                        _LOGGER.debug(f"✅ [7d] Found {valve_topic}: {result[0]:.2f}L, {result[1]:.2f}min")
+                        return result
+                    _LOGGER.debug(f"ℹ️ [7d] No sessions found for {valve_topic} in last 7 days")
+                    return (0.0, 0.0)
+                finally:
+                    cursor.close()
+
+            except Exception as e:
+                _LOGGER.error(f"❌ Error getting 7d usage: {e}", exc_info=True)
                 return (0.0, 0.0)
-            finally:
-                cursor.close()
-
-        except Exception as e:
-            _LOGGER.error(f"❌ Error getting 7d usage: {e}", exc_info=True)
-            return (0.0, 0.0)
 
     async def cleanup_old_sessions(self, days: int = 90):
         """Clean up sessions older than specified days"""
