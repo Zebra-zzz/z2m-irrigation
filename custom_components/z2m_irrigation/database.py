@@ -46,60 +46,62 @@ class IrrigationDatabase:
             return
 
         cursor = self._conn.cursor()
+        try:
+            # Valve totals table (lifetime + resettable)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS valve_totals (
+                    valve_topic TEXT PRIMARY KEY,
+                    valve_name TEXT NOT NULL,
+                    lifetime_total_liters REAL DEFAULT 0,
+                    lifetime_total_minutes REAL DEFAULT 0,
+                    lifetime_session_count INTEGER DEFAULT 0,
+                    resettable_total_liters REAL DEFAULT 0,
+                    resettable_total_minutes REAL DEFAULT 0,
+                    resettable_session_count INTEGER DEFAULT 0,
+                    last_reset_at TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-        # Valve totals table (lifetime + resettable)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS valve_totals (
-                valve_topic TEXT PRIMARY KEY,
-                valve_name TEXT NOT NULL,
-                lifetime_total_liters REAL DEFAULT 0,
-                lifetime_total_minutes REAL DEFAULT 0,
-                lifetime_session_count INTEGER DEFAULT 0,
-                resettable_total_liters REAL DEFAULT 0,
-                resettable_total_minutes REAL DEFAULT 0,
-                resettable_session_count INTEGER DEFAULT 0,
-                last_reset_at TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+            # Sessions table (complete history)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT UNIQUE NOT NULL,
+                    valve_topic TEXT NOT NULL,
+                    valve_name TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    duration_minutes REAL,
+                    volume_liters REAL DEFAULT 0,
+                    avg_flow_rate REAL,
+                    trigger_type TEXT DEFAULT 'manual',
+                    target_liters REAL,
+                    target_minutes REAL,
+                    completed_successfully INTEGER DEFAULT 1,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-        # Sessions table (complete history)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT UNIQUE NOT NULL,
-                valve_topic TEXT NOT NULL,
-                valve_name TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                ended_at TEXT,
-                duration_minutes REAL,
-                volume_liters REAL DEFAULT 0,
-                avg_flow_rate REAL,
-                trigger_type TEXT DEFAULT 'manual',
-                target_liters REAL,
-                target_minutes REAL,
-                completed_successfully INTEGER DEFAULT 1,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+            # Create indexes for performance
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sessions_valve
+                ON sessions(valve_topic)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sessions_started
+                ON sessions(started_at DESC)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sessions_ended
+                ON sessions(ended_at DESC)
+            """)
 
-        # Create indexes for performance
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_sessions_valve
-            ON sessions(valve_topic)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_sessions_started
-            ON sessions(started_at DESC)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_sessions_ended
-            ON sessions(ended_at DESC)
-        """)
-
-        self._conn.commit()
-        _LOGGER.debug("✅ Database tables created/verified")
+            self._conn.commit()
+            _LOGGER.debug("✅ Database tables created/verified")
+        finally:
+            cursor.close()
 
     async def load_valve_totals(self, valve_topic: str) -> Dict[str, float]:
         """Load persisted totals from local database"""
@@ -132,28 +134,31 @@ class IrrigationDatabase:
                 return default_totals
 
             cursor = self._conn.cursor()
-            cursor.execute(
-                "SELECT * FROM valve_totals WHERE valve_topic = ?",
-                (valve_topic_str,)
-            )
-            row = cursor.fetchone()
+            try:
+                cursor.execute(
+                    "SELECT * FROM valve_totals WHERE valve_topic = ?",
+                    (valve_topic_str,)
+                )
+                row = cursor.fetchone()
 
-            if row:
-                totals = {
-                    "lifetime_total_liters": float(row["lifetime_total_liters"]),
-                    "lifetime_total_minutes": float(row["lifetime_total_minutes"]),
-                    "lifetime_session_count": int(row["lifetime_session_count"]),
-                    "resettable_total_liters": float(row["resettable_total_liters"]),
-                    "resettable_total_minutes": float(row["resettable_total_minutes"]),
-                    "resettable_session_count": int(row["resettable_session_count"]),
-                }
-                _LOGGER.info(f"✅ Loaded totals for {valve_topic}:")
-                _LOGGER.info(f"   Lifetime: {totals['lifetime_total_liters']:.2f} L, {totals['lifetime_total_minutes']:.2f} min")
-                _LOGGER.info(f"   Resettable: {totals['resettable_total_liters']:.2f} L, {totals['resettable_total_minutes']:.2f} min")
-                return totals
+                if row:
+                    totals = {
+                        "lifetime_total_liters": float(row["lifetime_total_liters"]),
+                        "lifetime_total_minutes": float(row["lifetime_total_minutes"]),
+                        "lifetime_session_count": int(row["lifetime_session_count"]),
+                        "resettable_total_liters": float(row["resettable_total_liters"]),
+                        "resettable_total_minutes": float(row["resettable_total_minutes"]),
+                        "resettable_session_count": int(row["resettable_session_count"]),
+                    }
+                    _LOGGER.info(f"✅ Loaded totals for {valve_topic}:")
+                    _LOGGER.info(f"   Lifetime: {totals['lifetime_total_liters']:.2f} L, {totals['lifetime_total_minutes']:.2f} min")
+                    _LOGGER.info(f"   Resettable: {totals['resettable_total_liters']:.2f} L, {totals['resettable_total_minutes']:.2f} min")
+                    return totals
 
-            _LOGGER.info(f"ℹ️ No existing totals found for {valve_topic} - starting fresh")
-            return default_totals
+                _LOGGER.info(f"ℹ️ No existing totals found for {valve_topic} - starting fresh")
+                return default_totals
+            finally:
+                cursor.close()
 
         except Exception as e:
             _LOGGER.error(f"❌ Error loading valve totals for '{valve_topic}': {e}", exc_info=True)
@@ -175,76 +180,78 @@ class IrrigationDatabase:
 
         try:
             cursor = self._conn.cursor()
+            try:
+                # Check if record exists
+                cursor.execute(
+                    "SELECT * FROM valve_totals WHERE valve_topic = ?",
+                    (valve_topic,)
+                )
+                existing = cursor.fetchone()
 
-            # Check if record exists
-            cursor.execute(
-                "SELECT * FROM valve_totals WHERE valve_topic = ?",
-                (valve_topic,)
-            )
-            existing = cursor.fetchone()
+                if existing:
+                    # Update existing record
+                    new_totals = {
+                        "lifetime_total_liters": float(existing["lifetime_total_liters"]) + liters,
+                        "lifetime_total_minutes": float(existing["lifetime_total_minutes"]) + minutes,
+                        "lifetime_session_count": int(existing["lifetime_session_count"]) + 1,
+                        "resettable_total_liters": float(existing["resettable_total_liters"]) + liters,
+                        "resettable_total_minutes": float(existing["resettable_total_minutes"]) + minutes,
+                        "resettable_session_count": int(existing["resettable_session_count"]) + 1,
+                    }
 
-            if existing:
-                # Update existing record
-                new_totals = {
-                    "lifetime_total_liters": float(existing["lifetime_total_liters"]) + liters,
-                    "lifetime_total_minutes": float(existing["lifetime_total_minutes"]) + minutes,
-                    "lifetime_session_count": int(existing["lifetime_session_count"]) + 1,
-                    "resettable_total_liters": float(existing["resettable_total_liters"]) + liters,
-                    "resettable_total_minutes": float(existing["resettable_total_minutes"]) + minutes,
-                    "resettable_session_count": int(existing["resettable_session_count"]) + 1,
-                }
+                    cursor.execute("""
+                        UPDATE valve_totals
+                        SET valve_name = ?,
+                            lifetime_total_liters = ?,
+                            lifetime_total_minutes = ?,
+                            lifetime_session_count = ?,
+                            resettable_total_liters = ?,
+                            resettable_total_minutes = ?,
+                            resettable_session_count = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE valve_topic = ?
+                    """, (
+                        valve_name,
+                        new_totals["lifetime_total_liters"],
+                        new_totals["lifetime_total_minutes"],
+                        new_totals["lifetime_session_count"],
+                        new_totals["resettable_total_liters"],
+                        new_totals["resettable_total_minutes"],
+                        new_totals["resettable_session_count"],
+                        valve_topic
+                    ))
+                else:
+                    # Insert new record
+                    new_totals = {
+                        "lifetime_total_liters": liters,
+                        "lifetime_total_minutes": minutes,
+                        "lifetime_session_count": 1,
+                        "resettable_total_liters": liters,
+                        "resettable_total_minutes": minutes,
+                        "resettable_session_count": 1,
+                    }
 
-                cursor.execute("""
-                    UPDATE valve_totals
-                    SET valve_name = ?,
-                        lifetime_total_liters = ?,
-                        lifetime_total_minutes = ?,
-                        lifetime_session_count = ?,
-                        resettable_total_liters = ?,
-                        resettable_total_minutes = ?,
-                        resettable_session_count = ?,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE valve_topic = ?
-                """, (
-                    valve_name,
-                    new_totals["lifetime_total_liters"],
-                    new_totals["lifetime_total_minutes"],
-                    new_totals["lifetime_session_count"],
-                    new_totals["resettable_total_liters"],
-                    new_totals["resettable_total_minutes"],
-                    new_totals["resettable_session_count"],
-                    valve_topic
-                ))
-            else:
-                # Insert new record
-                new_totals = {
-                    "lifetime_total_liters": liters,
-                    "lifetime_total_minutes": minutes,
-                    "lifetime_session_count": 1,
-                    "resettable_total_liters": liters,
-                    "resettable_total_minutes": minutes,
-                    "resettable_session_count": 1,
-                }
+                    cursor.execute("""
+                        INSERT INTO valve_totals
+                        (valve_topic, valve_name, lifetime_total_liters, lifetime_total_minutes,
+                         lifetime_session_count, resettable_total_liters, resettable_total_minutes,
+                         resettable_session_count)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        valve_topic, valve_name,
+                        new_totals["lifetime_total_liters"],
+                        new_totals["lifetime_total_minutes"],
+                        new_totals["lifetime_session_count"],
+                        new_totals["resettable_total_liters"],
+                        new_totals["resettable_total_minutes"],
+                        new_totals["resettable_session_count"]
+                    ))
 
-                cursor.execute("""
-                    INSERT INTO valve_totals
-                    (valve_topic, valve_name, lifetime_total_liters, lifetime_total_minutes,
-                     lifetime_session_count, resettable_total_liters, resettable_total_minutes,
-                     resettable_session_count)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    valve_topic, valve_name,
-                    new_totals["lifetime_total_liters"],
-                    new_totals["lifetime_total_minutes"],
-                    new_totals["lifetime_session_count"],
-                    new_totals["resettable_total_liters"],
-                    new_totals["resettable_total_minutes"],
-                    new_totals["resettable_session_count"]
-                ))
-
-            self._conn.commit()
-            _LOGGER.debug(f"💾 Saved totals for {valve_topic}: +{liters:.2f}L, +{minutes:.2f}min")
-            return new_totals
+                self._conn.commit()
+                _LOGGER.debug(f"💾 Saved totals for {valve_topic}: +{liters:.2f}L, +{minutes:.2f}min")
+                return new_totals
+            finally:
+                cursor.close()
 
         except Exception as e:
             _LOGGER.error(f"❌ Error saving valve totals: {e}", exc_info=True)
@@ -263,19 +270,22 @@ class IrrigationDatabase:
 
         try:
             cursor = self._conn.cursor()
-            cursor.execute("""
-                UPDATE valve_totals
-                SET resettable_total_liters = 0,
-                    resettable_total_minutes = 0,
-                    resettable_session_count = 0,
-                    last_reset_at = CURRENT_TIMESTAMP,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE valve_topic = ?
-            """, (valve_topic,))
+            try:
+                cursor.execute("""
+                    UPDATE valve_totals
+                    SET resettable_total_liters = 0,
+                        resettable_total_minutes = 0,
+                        resettable_session_count = 0,
+                        last_reset_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE valve_topic = ?
+                """, (valve_topic,))
 
-            self._conn.commit()
-            _LOGGER.info(f"🔄 Reset resettable totals for {valve_topic} (lifetime preserved)")
-            return True
+                self._conn.commit()
+                _LOGGER.info(f"🔄 Reset resettable totals for {valve_topic} (lifetime preserved)")
+                return True
+            finally:
+                cursor.close()
 
         except Exception as e:
             _LOGGER.error(f"❌ Error resetting totals: {e}", exc_info=True)
@@ -299,19 +309,22 @@ class IrrigationDatabase:
 
         try:
             cursor = self._conn.cursor()
-            started_at = datetime.utcnow().isoformat()
+            try:
+                started_at = datetime.utcnow().isoformat()
 
-            cursor.execute("""
-                INSERT INTO sessions
-                (session_id, valve_topic, valve_name, started_at, trigger_type,
-                 target_liters, target_minutes, completed_successfully)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-            """, (session_id, valve_topic, valve_name, started_at, trigger_type,
-                  target_liters, target_minutes))
+                cursor.execute("""
+                    INSERT INTO sessions
+                    (session_id, valve_topic, valve_name, started_at, trigger_type,
+                     target_liters, target_minutes, completed_successfully)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+                """, (session_id, valve_topic, valve_name, started_at, trigger_type,
+                      target_liters, target_minutes))
 
-            self._conn.commit()
-            _LOGGER.info(f"🚿 Session started: {session_id} for {valve_name}")
-            return True
+                self._conn.commit()
+                _LOGGER.info(f"🚿 Session started: {session_id} for {valve_name}")
+                return True
+            finally:
+                cursor.close()
 
         except Exception as e:
             _LOGGER.error(f"❌ Error starting session: {e}", exc_info=True)
@@ -332,21 +345,24 @@ class IrrigationDatabase:
 
         try:
             cursor = self._conn.cursor()
-            ended_at = datetime.utcnow().isoformat()
+            try:
+                ended_at = datetime.utcnow().isoformat()
 
-            cursor.execute("""
-                UPDATE sessions
-                SET ended_at = ?,
-                    duration_minutes = ?,
-                    volume_liters = ?,
-                    avg_flow_rate = ?,
-                    completed_successfully = 1
-                WHERE session_id = ?
-            """, (ended_at, duration_minutes, volume_liters, avg_flow_rate, session_id))
+                cursor.execute("""
+                    UPDATE sessions
+                    SET ended_at = ?,
+                        duration_minutes = ?,
+                        volume_liters = ?,
+                        avg_flow_rate = ?,
+                        completed_successfully = 1
+                    WHERE session_id = ?
+                """, (ended_at, duration_minutes, volume_liters, avg_flow_rate, session_id))
 
-            self._conn.commit()
-            _LOGGER.info(f"🛑 Session ended: {session_id} - {duration_minutes:.2f}min, {volume_liters:.2f}L")
-            return True
+                self._conn.commit()
+                _LOGGER.info(f"🛑 Session ended: {session_id} - {duration_minutes:.2f}min, {volume_liters:.2f}L")
+                return True
+            finally:
+                cursor.close()
 
         except Exception as e:
             _LOGGER.error(f"❌ Error ending session: {e}", exc_info=True)
@@ -365,20 +381,23 @@ class IrrigationDatabase:
 
         try:
             cursor = self._conn.cursor()
-            cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+            try:
+                cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
 
-            cursor.execute("""
-                SELECT
-                    COALESCE(SUM(volume_liters), 0) as total_liters,
-                    COALESCE(SUM(duration_minutes), 0) as total_minutes
-                FROM sessions
-                WHERE valve_topic = ?
-                  AND started_at >= ?
-                  AND ended_at IS NOT NULL
-            """, (valve_topic, cutoff))
+                cursor.execute("""
+                    SELECT
+                        COALESCE(SUM(volume_liters), 0) as total_liters,
+                        COALESCE(SUM(duration_minutes), 0) as total_minutes
+                    FROM sessions
+                    WHERE valve_topic = ?
+                      AND started_at >= ?
+                      AND ended_at IS NOT NULL
+                """, (valve_topic, cutoff))
 
-            row = cursor.fetchone()
-            return (float(row["total_liters"]), float(row["total_minutes"]))
+                row = cursor.fetchone()
+                return (float(row["total_liters"]), float(row["total_minutes"]))
+            finally:
+                cursor.close()
 
         except Exception as e:
             _LOGGER.error(f"❌ Error getting 24h usage: {e}", exc_info=True)
@@ -397,20 +416,23 @@ class IrrigationDatabase:
 
         try:
             cursor = self._conn.cursor()
-            cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
+            try:
+                cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
 
-            cursor.execute("""
-                SELECT
-                    COALESCE(SUM(volume_liters), 0) as total_liters,
-                    COALESCE(SUM(duration_minutes), 0) as total_minutes
-                FROM sessions
-                WHERE valve_topic = ?
-                  AND started_at >= ?
-                  AND ended_at IS NOT NULL
-            """, (valve_topic, cutoff))
+                cursor.execute("""
+                    SELECT
+                        COALESCE(SUM(volume_liters), 0) as total_liters,
+                        COALESCE(SUM(duration_minutes), 0) as total_minutes
+                    FROM sessions
+                    WHERE valve_topic = ?
+                      AND started_at >= ?
+                      AND ended_at IS NOT NULL
+                """, (valve_topic, cutoff))
 
-            row = cursor.fetchone()
-            return (float(row["total_liters"]), float(row["total_minutes"]))
+                row = cursor.fetchone()
+                return (float(row["total_liters"]), float(row["total_minutes"]))
+            finally:
+                cursor.close()
 
         except Exception as e:
             _LOGGER.error(f"❌ Error getting 7d usage: {e}", exc_info=True)
@@ -429,18 +451,21 @@ class IrrigationDatabase:
 
         try:
             cursor = self._conn.cursor()
-            cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+            try:
+                cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
 
-            cursor.execute("""
-                DELETE FROM sessions
-                WHERE started_at < ?
-            """, (cutoff,))
+                cursor.execute("""
+                    DELETE FROM sessions
+                    WHERE started_at < ?
+                """, (cutoff,))
 
-            deleted = cursor.rowcount
-            self._conn.commit()
+                deleted = cursor.rowcount
+                self._conn.commit()
 
-            if deleted > 0:
-                _LOGGER.info(f"🧹 Cleaned up {deleted} old sessions (>{days} days)")
+                if deleted > 0:
+                    _LOGGER.info(f"🧹 Cleaned up {deleted} old sessions (>{days} days)")
+            finally:
+                cursor.close()
 
         except Exception as e:
             _LOGGER.error(f"❌ Error cleaning up sessions: {e}", exc_info=True)
