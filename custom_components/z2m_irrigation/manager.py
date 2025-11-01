@@ -230,12 +230,14 @@ class ValveManager:
             if new_state in ("ON", "OPEN", "1", "TRUE"):
                 new_state = "ON"
                 if not v.session_active:
+                    _LOGGER.debug(f"🚿 [MANAGER] Session starting for {v.name}")
                     v.session_active = True
                     v.session_start_ts = now
                     v.session_liters = 0.0
                     v.session_count += 1
                     # Log session start to local database
                     target = v.target_liters if v.target_liters else (v.session_end_ts - now) / 60.0 if v.session_end_ts else None
+                    _LOGGER.debug(f"🚿 [MANAGER] Logging session start for {v.name}, target={target}")
                     self._schedule_task(
                         self._log_session_start(v, target)
                     )
@@ -244,6 +246,7 @@ class ValveManager:
                 if v.session_active:
                     session_duration = (now - v.session_start_ts) / 60.0
                     avg_flow = v.session_liters / session_duration if session_duration > 0 else 0
+                    _LOGGER.debug(f"🛑 [MANAGER] Session ending for {v.name}: {session_duration:.2f}min, {v.session_liters:.2f}L, {avg_flow:.2f}lpm")
                     # Log session end to local database and update totals
                     if v.current_session_id:
                         async def _end_and_sync():

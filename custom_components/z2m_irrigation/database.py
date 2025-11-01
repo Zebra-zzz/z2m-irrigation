@@ -105,9 +105,12 @@ class IrrigationDatabase:
 
     async def load_valve_totals(self, valve_topic: str) -> Dict[str, float]:
         """Load persisted totals from local database"""
-        return await self.hass.async_add_executor_job(
+        _LOGGER.debug(f"💾 [DB] ➡️ load_valve_totals: {valve_topic}")
+        result = await self.hass.async_add_executor_job(
             self._load_valve_totals_sync, valve_topic
         )
+        _LOGGER.debug(f"💾 [DB] ⮅️ load_valve_totals result: lifetime={result['lifetime_total_liters']:.2f}L, resettable={result['resettable_total_liters']:.2f}L")
+        return result
 
     def _load_valve_totals_sync(self, valve_topic: str) -> Dict[str, float]:
         """Synchronous load of valve totals"""
@@ -168,9 +171,13 @@ class IrrigationDatabase:
     async def save_valve_totals(self, valve_topic: str, valve_name: str,
                                 liters: float, minutes: float) -> Optional[Dict[str, float]]:
         """Update valve totals in database"""
-        return await self.hass.async_add_executor_job(
+        _LOGGER.debug(f"💾 [DB] ➡️ save_valve_totals: {valve_name} +{liters:.2f}L +{minutes:.2f}min")
+        result = await self.hass.async_add_executor_job(
             self._save_valve_totals_sync, valve_topic, valve_name, liters, minutes
         )
+        if result:
+            _LOGGER.debug(f"💾 [DB] ⬅️ save_valve_totals result: lifetime={result['lifetime_total_liters']:.2f}L, resettable={result['resettable_total_liters']:.2f}L")
+        return result
 
     def _save_valve_totals_sync(self, valve_topic: str, valve_name: str,
                                  liters: float, minutes: float) -> Optional[Dict[str, float]]:
@@ -295,10 +302,13 @@ class IrrigationDatabase:
                            trigger_type: str = "manual", target_liters: Optional[float] = None,
                            target_minutes: Optional[float] = None) -> bool:
         """Log session start"""
-        return await self.hass.async_add_executor_job(
+        _LOGGER.debug(f"💾 [DB] ➡️ start_session: {session_id} for {valve_name}, trigger={trigger_type}, target={target_liters}L/{target_minutes}min")
+        result = await self.hass.async_add_executor_job(
             self._start_session_sync, session_id, valve_topic, valve_name,
             trigger_type, target_liters, target_minutes
         )
+        _LOGGER.debug(f"💾 [DB] ⬅️ start_session result: {result}")
+        return result
 
     def _start_session_sync(self, session_id: str, valve_topic: str, valve_name: str,
                             trigger_type: str, target_liters: Optional[float],
@@ -333,9 +343,12 @@ class IrrigationDatabase:
     async def end_session(self, session_id: str, duration_minutes: float,
                          volume_liters: float, avg_flow_rate: float) -> bool:
         """Log session end and update totals"""
-        return await self.hass.async_add_executor_job(
+        _LOGGER.debug(f"💾 [DB] ➡️ end_session: {session_id}, {duration_minutes:.2f}min, {volume_liters:.2f}L, {avg_flow_rate:.2f}lpm")
+        result = await self.hass.async_add_executor_job(
             self._end_session_sync, session_id, duration_minutes, volume_liters, avg_flow_rate
         )
+        _LOGGER.debug(f"💾 [DB] ⮅️ end_session result: {result}")
+        return result
 
     def _end_session_sync(self, session_id: str, duration_minutes: float,
                           volume_liters: float, avg_flow_rate: float) -> bool:
@@ -370,9 +383,12 @@ class IrrigationDatabase:
 
     async def get_usage_last_24h(self, valve_topic: str) -> Tuple[float, float]:
         """Get liters and minutes used in last 24 hours"""
-        return await self.hass.async_add_executor_job(
+        _LOGGER.debug(f"💾 [DB] ➡️ get_usage_last_24h: {valve_topic}")
+        result = await self.hass.async_add_executor_job(
             self._get_usage_last_24h_sync, valve_topic
         )
+        _LOGGER.debug(f"💾 [DB] ⮅️ get_usage_last_24h result: {result[0]:.2f}L, {result[1]:.2f}min")
+        return result
 
     def _get_usage_last_24h_sync(self, valve_topic: str) -> Tuple[float, float]:
         """Synchronous get 24h usage"""
@@ -412,9 +428,12 @@ class IrrigationDatabase:
 
     async def get_usage_last_7d(self, valve_topic: str) -> Tuple[float, float]:
         """Get liters and minutes used in last 7 days"""
-        return await self.hass.async_add_executor_job(
+        _LOGGER.debug(f"💾 [DB] ➡️ get_usage_last_7d: {valve_topic}")
+        result = await self.hass.async_add_executor_job(
             self._get_usage_last_7d_sync, valve_topic
         )
+        _LOGGER.debug(f"💾 [DB] ⮅️ get_usage_last_7d result: {result[0]:.2f}L, {result[1]:.2f}min")
+        return result
 
     def _get_usage_last_7d_sync(self, valve_topic: str) -> Tuple[float, float]:
         """Synchronous get 7d usage"""

@@ -1,4 +1,6 @@
-# Debugging 24h/7d Entities Not Updating
+# Complete Integration Debug Logging
+
+**NOW WITH COMPREHENSIVE LOGGING** - Every database operation and manager action is logged!
 
 ## Step 1: Enable Debug Logging
 
@@ -28,20 +30,41 @@ Then either:
 
 Go to Settings → System → Logs and search for `z2m` or `24h` or `7d`
 
-You should see detailed debug messages like:
+You should see VERY DETAILED debug messages like:
 
 ```
-🚿 Session started: Front Garden_1730512345.67 for Front Garden
+🚿 [MANAGER] Session starting for Front Garden
+🚿 [MANAGER] Logging session start for Front Garden, target=None
+💾 [DB] ➡️ start_session: Front_Garden_1730512345.67 for Front Garden, trigger=manual, target=None
+💾 [DB] ⬅️ start_session result: True
+🚿 Session started: Front_Garden_1730512345.67 for Front Garden
+
+... (valve runs for 2 minutes) ...
+
+🛑 [MANAGER] Session ending for Front Garden: 2.00min, 5.50L, 2.75lpm
+💾 [DB] ➡️ end_session: Front_Garden_1730512345.67, 2.00min, 5.50L, 2.75lpm
+💾 [DB] ⬅️ end_session result: True
+🛑 Session ended: Front_Garden_1730512345.67 - 2.00min, 5.50L
+
+💾 [DB] ➡️ save_valve_totals: Front Garden +5.50L +2.00min
+💾 [DB] ⬅️ save_valve_totals result: lifetime=5.50L, resettable=5.50L
 💾 Saved totals for Front Garden: +5.50L, +2.00min
+
 🔄 Updating time-based metrics for Front Garden
+💾 [DB] ➡️ get_usage_last_24h: Front Garden
 🔍 [24h] Querying usage for Front Garden since 2025-11-01T02:18:45
 ✅ [24h] Found Front Garden: 5.50L, 2.00min
+💾 [DB] ⬅️ get_usage_last_24h result: 5.50L, 2.00min
    24h: 5.50L, 2.00min
+
+💾 [DB] ➡️ get_usage_last_7d: Front Garden
 🔍 [7d] Querying usage for Front Garden since 2025-10-25T03:18:45
 ✅ [7d] Found Front Garden: 5.50L, 2.00min
+💾 [DB] ⬅️ get_usage_last_7d result: 5.50L, 2.00min
    7d: 5.50L, 2.00min
-🛑 Session ended: Front Garden_1730512345.67 - 2.00min, 5.50L
 ```
+
+**Every database operation** is now logged with ➡️ (entering) and ⬅️ (returning) arrows!
 
 ## Step 4: Check the Database Directly
 
