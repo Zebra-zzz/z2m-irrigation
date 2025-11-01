@@ -11,9 +11,11 @@ All notable changes to the Z2M Irrigation integration will be documented in this
 - Fixed `async_add_entities` RuntimeError by adding @callback decorator to entity addition functions
 - Fixed missing `_LOGGER` import in `__init__.py`
 - Fixed SQLite concurrent access issues by enabling WAL mode
-- Fixed SQLite cursor management - all cursors now properly closed after use
 - Fixed SQLite query handling for NULL results in 24h/7d usage calculations
-- Fixed SQLite parameter validation error in 24h/7d queries - added type checking and explicit string conversion to prevent "bad parameter" errors
+- **Fixed SQLite "bad parameter or other API misuse" errors** by:
+  - Using `connection.execute()` directly instead of creating cursors (better thread safety in Home Assistant's executor)
+  - Adding explicit string conversion for all parameters
+  - Adding parameter validation and type checking
 - **Added COMPLETE debug logging** - Every database operation, manager action, and session tracked with ➡️/⬅️ arrows (see DEBUGGING-24H-7D.md)
 - Integration now loads successfully even if MQTT connects after integration startup
 

@@ -136,12 +136,14 @@ class IrrigationDatabase:
                 _LOGGER.warning(f"⚠️ Empty valve_topic provided")
                 return default_totals
 
-            cursor = self._conn.cursor()
+            _LOGGER.debug(f"🔍 Creating cursor for valve_topic='{valve_topic_str}'")
+
+            # Use connection.execute instead of cursor for better thread safety
+            cursor = self._conn.execute(
+                "SELECT * FROM valve_totals WHERE valve_topic = ?",
+                (valve_topic_str,)
+            )
             try:
-                cursor.execute(
-                    "SELECT * FROM valve_totals WHERE valve_topic = ?",
-                    (valve_topic_str,)
-                )
                 row = cursor.fetchone()
 
                 if row:
@@ -186,13 +188,12 @@ class IrrigationDatabase:
             return None
 
         try:
-            cursor = self._conn.cursor()
+            # Use connection.execute for better thread safety
+            cursor = self._conn.execute(
+                "SELECT * FROM valve_totals WHERE valve_topic = ?",
+                (str(valve_topic),)
+            )
             try:
-                # Check if record exists
-                cursor.execute(
-                    "SELECT * FROM valve_totals WHERE valve_topic = ?",
-                    (valve_topic,)
-                )
                 existing = cursor.fetchone()
 
                 if existing:
@@ -318,23 +319,20 @@ class IrrigationDatabase:
             return False
 
         try:
-            cursor = self._conn.cursor()
-            try:
-                started_at = datetime.utcnow().isoformat()
+            started_at = datetime.utcnow().isoformat()
 
-                cursor.execute("""
-                    INSERT INTO sessions
-                    (session_id, valve_topic, valve_name, started_at, trigger_type,
-                     target_liters, target_minutes, completed_successfully)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-                """, (session_id, valve_topic, valve_name, started_at, trigger_type,
-                      target_liters, target_minutes))
+            # Use connection.execute for better thread safety
+            self._conn.execute("""
+                INSERT INTO sessions
+                (session_id, valve_topic, valve_name, started_at, trigger_type,
+                 target_liters, target_minutes, completed_successfully)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+            """, (str(session_id), str(valve_topic), str(valve_name), str(started_at), str(trigger_type),
+                  target_liters, target_minutes))
 
-                self._conn.commit()
-                _LOGGER.info(f"🚿 Session started: {session_id} for {valve_name}")
-                return True
-            finally:
-                cursor.close()
+            self._conn.commit()
+            _LOGGER.info(f"🚿 Session started: {session_id} for {valve_name}")
+            return True
 
         except Exception as e:
             _LOGGER.error(f"❌ Error starting session: {e}", exc_info=True)
@@ -357,25 +355,22 @@ class IrrigationDatabase:
             return False
 
         try:
-            cursor = self._conn.cursor()
-            try:
-                ended_at = datetime.utcnow().isoformat()
+            ended_at = datetime.utcnow().isoformat()
 
-                cursor.execute("""
-                    UPDATE sessions
-                    SET ended_at = ?,
-                        duration_minutes = ?,
-                        volume_liters = ?,
-                        avg_flow_rate = ?,
-                        completed_successfully = 1
-                    WHERE session_id = ?
-                """, (ended_at, duration_minutes, volume_liters, avg_flow_rate, session_id))
+            # Use connection.execute for better thread safety
+            self._conn.execute("""
+                UPDATE sessions
+                SET ended_at = ?,
+                    duration_minutes = ?,
+                    volume_liters = ?,
+                    avg_flow_rate = ?,
+                    completed_successfully = 1
+                WHERE session_id = ?
+            """, (str(ended_at), duration_minutes, volume_liters, avg_flow_rate, str(session_id)))
 
-                self._conn.commit()
-                _LOGGER.info(f"🛑 Session ended: {session_id} - {duration_minutes:.2f}min, {volume_liters:.2f}L")
-                return True
-            finally:
-                cursor.close()
+            self._conn.commit()
+            _LOGGER.info(f"🛑 Session ended: {session_id} - {duration_minutes:.2f}min, {volume_liters:.2f}L")
+            return True
 
         except Exception as e:
             _LOGGER.error(f"❌ Error ending session: {e}", exc_info=True)
@@ -402,21 +397,21 @@ class IrrigationDatabase:
             return (0.0, 0.0)
 
         try:
-            cursor = self._conn.cursor()
-            try:
-                cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
-                _LOGGER.debug(f"🔍 [24h] Querying usage for '{valve_topic}' since {cutoff}")
-                _LOGGER.debug(f"🔍 [24h] Parameters: valve_topic={repr(valve_topic)}, cutoff={repr(cutoff)}")
+            cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+            _LOGGER.debug(f"🔍 [24h] Querying usage for '{valve_topic}' since {cutoff}")
+            _LOGGER.debug(f"🔍 [24h] Parameters: valve_topic={repr(valve_topic)}, cutoff={repr(cutoff)}")
 
-                cursor.execute("""
-                    SELECT
-                        COALESCE(SUM(volume_liters), 0) as total_liters,
-                        COALESCE(SUM(duration_minutes), 0) as total_minutes
-                    FROM sessions
-                    WHERE valve_topic = ?
-                      AND started_at >= ?
-                      AND ended_at IS NOT NULL
-                """, (str(valve_topic), str(cutoff)))
+            # Use connection.execute for better thread safety
+            cursor = self._conn.execute("""
+                SELECT
+                    COALESCE(SUM(volume_liters), 0) as total_liters,
+                    COALESCE(SUM(duration_minutes), 0) as total_minutes
+                FROM sessions
+                WHERE valve_topic = ?
+                  AND started_at >= ?
+                  AND ended_at IS NOT NULL
+            """, (str(valve_topic), str(cutoff)))
+            try:
 
                 row = cursor.fetchone()
                 if row:
@@ -453,21 +448,21 @@ class IrrigationDatabase:
             return (0.0, 0.0)
 
         try:
-            cursor = self._conn.cursor()
-            try:
-                cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
-                _LOGGER.debug(f"🔍 [7d] Querying usage for '{valve_topic}' since {cutoff}")
-                _LOGGER.debug(f"🔍 [7d] Parameters: valve_topic={repr(valve_topic)}, cutoff={repr(cutoff)}")
+            cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
+            _LOGGER.debug(f"🔍 [7d] Querying usage for '{valve_topic}' since {cutoff}")
+            _LOGGER.debug(f"🔍 [7d] Parameters: valve_topic={repr(valve_topic)}, cutoff={repr(cutoff)}")
 
-                cursor.execute("""
-                    SELECT
-                        COALESCE(SUM(volume_liters), 0) as total_liters,
-                        COALESCE(SUM(duration_minutes), 0) as total_minutes
-                    FROM sessions
-                    WHERE valve_topic = ?
-                      AND started_at >= ?
-                      AND ended_at IS NOT NULL
-                """, (str(valve_topic), str(cutoff)))
+            # Use connection.execute for better thread safety
+            cursor = self._conn.execute("""
+                SELECT
+                    COALESCE(SUM(volume_liters), 0) as total_liters,
+                    COALESCE(SUM(duration_minutes), 0) as total_minutes
+                FROM sessions
+                WHERE valve_topic = ?
+                  AND started_at >= ?
+                  AND ended_at IS NOT NULL
+            """, (str(valve_topic), str(cutoff)))
+            try:
 
                 row = cursor.fetchone()
                 if row:
