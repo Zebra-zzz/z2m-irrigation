@@ -395,7 +395,9 @@ class IrrigationDatabase:
                 """, (valve_topic, cutoff))
 
                 row = cursor.fetchone()
-                return (float(row["total_liters"]), float(row["total_minutes"]))
+                if row:
+                    return (float(row["total_liters"]), float(row["total_minutes"]))
+                return (0.0, 0.0)
             finally:
                 cursor.close()
 
@@ -430,7 +432,9 @@ class IrrigationDatabase:
                 """, (valve_topic, cutoff))
 
                 row = cursor.fetchone()
-                return (float(row["total_liters"]), float(row["total_minutes"]))
+                if row:
+                    return (float(row["total_liters"]), float(row["total_minutes"]))
+                return (0.0, 0.0)
             finally:
                 cursor.close()
 

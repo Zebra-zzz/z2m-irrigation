@@ -17,6 +17,7 @@ async def async_setup_entry(
 ) -> None:
     mgr: ValveManager = hass.data[DOMAIN][entry.entry_id]["manager"]
 
+    @callback
     def _add_numbers(valve: Valve):
         async_add_entities([
             TargetMinutesNumber(mgr, valve),

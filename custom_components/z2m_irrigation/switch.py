@@ -9,6 +9,7 @@ from .const import DOMAIN, MANUFACTURER, MODEL, SIG_NEW_VALVE, sig_update
 
 async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
     mgr: ValveManager = hass.data[DOMAIN][entry.entry_id]["manager"]
+    @callback
     def _add(v: Valve):
         async_add_entities([ValveSwitch(mgr, v)], True)
     for v in list(mgr.valves.values()):

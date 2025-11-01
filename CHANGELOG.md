@@ -8,10 +8,11 @@ All notable changes to the Z2M Irrigation integration will be documented in this
 
 #### Bug Fixes (Latest)
 - Fixed MQTT connection timing issue on startup (graceful handling if MQTT not ready)
-- Fixed `async_add_entities` TypeError (removed incorrect await statements)
+- Fixed `async_add_entities` RuntimeError by adding @callback decorator to entity addition functions
 - Fixed missing `_LOGGER` import in `__init__.py`
 - Fixed SQLite concurrent access issues by enabling WAL mode
 - Fixed SQLite cursor management - all cursors now properly closed after use
+- Fixed SQLite query handling for NULL results in 24h/7d usage calculations
 - Integration now loads successfully even if MQTT connects after integration startup
 
 #### Breaking Changes
