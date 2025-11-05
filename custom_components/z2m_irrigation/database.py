@@ -530,6 +530,42 @@ class IrrigationDatabase:
                 _LOGGER.error(f"❌ Error getting last session start: {e}", exc_info=True)
                 return None
 
+    async def get_last_session_end(self, valve_topic: str) -> Optional[str]:
+        """Get the end datetime of the most recent completed session"""
+        _LOGGER.debug(f"💾 [DB] ➡️ get_last_session_end: {valve_topic}")
+        result = await self.hass.async_add_executor_job(
+            self._get_last_session_end_sync, valve_topic
+        )
+        _LOGGER.debug(f"💾 [DB] ⬅️ get_last_session_end result: {result}")
+        return result
+
+    def _get_last_session_end_sync(self, valve_topic: str) -> Optional[str]:
+        """Synchronous get last session end"""
+        if not self._conn:
+            return None
+
+        with self._lock:
+            try:
+                cursor = self._conn.execute("""
+                    SELECT ended_at
+                    FROM sessions
+                    WHERE valve_topic = ?
+                      AND ended_at IS NOT NULL
+                    ORDER BY ended_at DESC
+                    LIMIT 1
+                """, (str(valve_topic),))
+                try:
+                    row = cursor.fetchone()
+                    if row and row["ended_at"]:
+                        return row["ended_at"]
+                    return None
+                finally:
+                    cursor.close()
+
+            except Exception as e:
+                _LOGGER.error(f"❌ Error getting last session end: {e}", exc_info=True)
+                return None
+
     async def cleanup_old_sessions(self, days: int = 90):
         """Clean up sessions older than specified days"""
         return await self.hass.async_add_executor_job(

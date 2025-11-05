@@ -52,6 +52,7 @@ class Valve:
     current_session_id: Optional[str] = None  # Track current session ID
     trigger_type: str = "manual"  # Track how valve was triggered
     last_session_start: Optional[str] = None  # ISO datetime of last session start
+    last_session_end: Optional[str] = None  # ISO datetime of last session end
 
 class ValveManager:
     def __init__(
@@ -128,8 +129,9 @@ class ValveManager:
                 last_7d = await self.db.get_usage_last_7d(topic)
                 v.last_7d_liters, v.last_7d_minutes = last_7d
 
-                # Refresh last session start
+                # Refresh last session start and end
                 v.last_session_start = await self.db.get_last_session_start(topic)
+                v.last_session_end = await self.db.get_last_session_end(topic)
 
                 _LOGGER.debug("✅ Refreshed %s: 24h=%.2fL, 7d=%.2fL, last session: %s",
                              v.name, v.last_24h_liters, v.last_7d_liters, v.last_session_start)
@@ -199,8 +201,9 @@ class ValveManager:
             last_7d = await self.db.get_usage_last_7d(topic)
             v.last_7d_liters, v.last_7d_minutes = last_7d
 
-            # Load last session start datetime
+            # Load last session start and end datetime
             v.last_session_start = await self.db.get_last_session_start(topic)
+            v.last_session_end = await self.db.get_last_session_end(topic)
 
             _LOGGER.info("Loaded totals for %s: %.2f L lifetime, %.2f L resettable, %.2f L (24h), %.2f L (7d), last session: %s",
                         name, v.lifetime_total_liters, v.total_liters, v.last_24h_liters, v.last_7d_liters, v.last_session_start)
@@ -338,9 +341,11 @@ class ValveManager:
                             v.last_7d_liters, v.last_7d_minutes = last_7d
                             _LOGGER.debug(f"   7d: {v.last_7d_liters:.2f}L, {v.last_7d_minutes:.2f}min")
 
-                            # Update last session start datetime
+                            # Update last session start and end datetime
                             v.last_session_start = await self.db.get_last_session_start(captured_topic)
+                            v.last_session_end = await self.db.get_last_session_end(captured_topic)
                             _LOGGER.debug(f"   last session start: {v.last_session_start}")
+                            _LOGGER.debug(f"   last session end: {v.last_session_end}")
 
                             self._dispatch_signal(sig_update(captured_topic))
                         self._schedule_task(_end_and_sync())

@@ -26,6 +26,7 @@ async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
             Last7dLiters(mgr, v),
             Last7dMinutes(mgr, v),
             LastSessionStart(mgr, v),
+            LastSessionEnd(mgr, v),
             SessionRemainingTime(mgr, v),
             SessionRemainingLiters(mgr, v),
             SessionCount(mgr, v),
@@ -192,6 +193,24 @@ class LastSessionStart(BaseValveSensor):
         try:
             # Parse ISO string to datetime object with UTC timezone
             dt = datetime.fromisoformat(self.valve.last_session_start.replace('Z', '+00:00'))
+            # Ensure timezone is set (Home Assistant requires timezone-aware datetime)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except (ValueError, AttributeError):
+            return None
+
+class LastSessionEnd(BaseValveSensor):
+    def __init__(self, mgr: ValveManager, valve: Valve): super().__init__(mgr, valve, "Last Session End", None, None)
+    @property
+    def device_class(self): return "timestamp"
+    @property
+    def native_value(self):
+        if not self.valve.last_session_end:
+            return None
+        try:
+            # Parse ISO string to datetime object with UTC timezone
+            dt = datetime.fromisoformat(self.valve.last_session_end.replace('Z', '+00:00'))
             # Ensure timezone is set (Home Assistant requires timezone-aware datetime)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
