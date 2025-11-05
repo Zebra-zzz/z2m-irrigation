@@ -1,0 +1,164 @@
+# Helper Entities for Irrigation Dashboard
+# Add these to your configuration.yaml or helpers via UI
+
+input_text:
+  schedule_name:
+    name: Schedule Name
+    initial: "New Schedule"
+    icon: mdi:form-textbox
+
+  schedule_moisture_sensor:
+    name: Soil Moisture Sensor Entity
+    initial: ""
+    icon: mdi:water-percent
+
+input_select:
+  schedule_valve:
+    name: Select Valve
+    options:
+      - Water Valve 1
+      - Water Valve 2
+      - Water Valve 3
+      - Water Valve 4
+    initial: Water Valve 1
+    icon: mdi:pipe-valve
+
+  schedule_run_type:
+    name: Run Type
+    options:
+      - duration
+      - volume
+    initial: duration
+    icon: mdi:timer
+
+input_number:
+  schedule_duration_minutes:
+    name: Duration (minutes)
+    min: 1
+    max: 120
+    step: 1
+    initial: 15
+    unit_of_measurement: min
+    icon: mdi:timer
+
+  schedule_volume_liters:
+    name: Volume (liters)
+    min: 1
+    max: 500
+    step: 1
+    initial: 50
+    unit_of_measurement: L
+    icon: mdi:water
+
+  schedule_interval_hours:
+    name: Interval (hours)
+    min: 1
+    max: 168
+    step: 1
+    initial: 12
+    unit_of_measurement: h
+    icon: mdi:clock
+
+  schedule_max_moisture:
+    name: Max Soil Moisture (%)
+    min: 0
+    max: 100
+    step: 5
+    initial: 50
+    unit_of_measurement: "%"
+    icon: mdi:water-percent
+
+  schedule_min_temp:
+    name: Min Temperature (°C)
+    min: -10
+    max: 50
+    step: 1
+    initial: 10
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer-low
+
+  schedule_max_temp:
+    name: Max Temperature (°C)
+    min: 0
+    max: 50
+    step: 1
+    initial: 35
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer-high
+
+input_datetime:
+  schedule_time_1:
+    name: Time 1
+    has_date: false
+    has_time: true
+    initial: "06:00"
+
+  schedule_time_2:
+    name: Time 2 (optional)
+    has_date: false
+    has_time: true
+    initial: "18:00"
+
+input_boolean:
+  schedule_monday:
+    name: Monday
+    initial: true
+    icon: mdi:calendar
+
+  schedule_tuesday:
+    name: Tuesday
+    initial: true
+    icon: mdi:calendar
+
+  schedule_wednesday:
+    name: Wednesday
+    initial: true
+    icon: mdi:calendar
+
+  schedule_thursday:
+    name: Thursday
+    initial: true
+    icon: mdi:calendar
+
+  schedule_friday:
+    name: Friday
+    initial: true
+    icon: mdi:calendar
+
+  schedule_saturday:
+    name: Saturday
+    initial: false
+    icon: mdi:calendar
+
+  schedule_sunday:
+    name: Sunday
+    initial: false
+    icon: mdi:calendar
+
+  schedule_skip_if_rain:
+    name: Skip if Rained
+    initial: false
+    icon: mdi:weather-rainy
+
+# Template Sensors for Dashboard
+template:
+  - sensor:
+      - name: "Irrigation Total Today"
+        unique_id: irrigation_total_today
+        unit_of_measurement: "L"
+        icon: mdi:water
+        state: >
+          {% set v1 = states('sensor.water_valve_1_session_used') | float(0) %}
+          {% set v2 = states('sensor.water_valve_2_session_used') | float(0) %}
+          {% set v3 = states('sensor.water_valve_3_session_used') | float(0) %}
+          {% set v4 = states('sensor.water_valve_4_session_used') | float(0) %}
+          {{ (v1 + v2 + v3 + v4) | round(1) }}
+
+      - name: "Irrigation Active Schedules"
+        unique_id: irrigation_active_schedules
+        icon: mdi:calendar-check
+        state: >
+          {# This would need to query Supabase - placeholder for now #}
+          {{ 0 }}
+        attributes:
+          friendly_name: "Active Schedules"

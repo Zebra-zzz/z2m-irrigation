@@ -1,0 +1,76 @@
+start_timed:
+  name: Start timed session
+  fields:
+    valve: {name: Valve, selector: {text: {}}}
+    minutes: {name: Minutes, selector: {number: {min: 0, step: 1}}}
+
+start_liters:
+  name: Start liters session
+  fields:
+    valve: {name: Valve, selector: {text: {}}}
+    liters: {name: Liters, selector: {number: {min: 0, step: 0.1}}}
+
+reset_totals:
+  name: Reset totals
+  fields:
+    valve: {name: Valve (optional), required: false, selector: {text: {}}}
+
+rescan:
+  name: Rescan Zigbee2MQTT devices
+  description: Re-requests the device list and re-subscribes without restarting.
+
+create_schedule:
+  name: Create irrigation schedule
+  description: Create a new time-based or interval-based irrigation schedule
+  fields:
+    name: {name: Schedule Name, required: true, selector: {text: {}}}
+    valve: {name: Valve Topic, required: true, selector: {text: {}}}
+    schedule_type: {name: Schedule Type, required: true, selector: {select: {options: [{label: "Time-based", value: "time_based"}, {label: "Interval", value: "interval"}]}}}
+    times: {name: Times (HH:MM), required: false, selector: {object: {}}}
+    days_of_week: {name: Days of Week (0-6), required: false, selector: {object: {}}}
+    interval_hours: {name: Interval Hours, required: false, selector: {number: {min: 1, max: 168}}}
+    run_type: {name: Run Type, required: true, selector: {select: {options: [{label: "Duration (minutes)", value: "duration"}, {label: "Volume (liters)", value: "volume"}]}}}
+    run_value: {name: Run Value, required: true, selector: {number: {min: 0.1, step: 0.1}}}
+    conditions: {name: Conditions (JSON), required: false, selector: {object: {}}}
+    enabled: {name: Enabled, required: false, default: true, selector: {boolean: {}}}
+
+update_schedule:
+  name: Update irrigation schedule
+  description: Update an existing irrigation schedule
+  fields:
+    schedule_id: {name: Schedule ID, required: true, selector: {text: {}}}
+    name: {name: Schedule Name, required: false, selector: {text: {}}}
+    valve: {name: Valve Topic, required: false, selector: {text: {}}}
+    schedule_type: {name: Schedule Type, required: false, selector: {select: {options: [{label: "Time-based", value: "time_based"}, {label: "Interval", value: "interval"}]}}}
+    times: {name: Times (HH:MM), required: false, selector: {object: {}}}
+    days_of_week: {name: Days of Week (0-6), required: false, selector: {object: {}}}
+    interval_hours: {name: Interval Hours, required: false, selector: {number: {min: 1, max: 168}}}
+    run_type: {name: Run Type, required: false, selector: {select: {options: [{label: "Duration (minutes)", value: "duration"}, {label: "Volume (liters)", value: "volume"}]}}}
+    run_value: {name: Run Value, required: false, selector: {number: {min: 0.1, step: 0.1}}}
+    conditions: {name: Conditions (JSON), required: false, selector: {object: {}}}
+    enabled: {name: Enabled, required: false, selector: {boolean: {}}}
+
+delete_schedule:
+  name: Delete irrigation schedule
+  fields:
+    schedule_id: {name: Schedule ID, required: true, selector: {text: {}}}
+
+enable_schedule:
+  name: Enable irrigation schedule
+  fields:
+    schedule_id: {name: Schedule ID, required: true, selector: {text: {}}}
+
+disable_schedule:
+  name: Disable irrigation schedule
+  fields:
+    schedule_id: {name: Schedule ID, required: true, selector: {text: {}}}
+
+run_schedule_now:
+  name: Run schedule immediately
+  description: Trigger a schedule to run now (ignores time settings)
+  fields:
+    schedule_id: {name: Schedule ID, required: true, selector: {text: {}}}
+
+reload_schedules:
+  name: Reload schedules
+  description: Reload all schedules from database

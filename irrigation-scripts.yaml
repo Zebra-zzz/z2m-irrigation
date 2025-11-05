@@ -1,0 +1,112 @@
+# Irrigation Dashboard Scripts
+# Add these to your scripts.yaml file or merge with existing scripts
+
+create_time_based_schedule:
+  alias: Create Time-Based Schedule
+  icon: mdi:calendar-plus
+  mode: single
+  sequence:
+    - action: z2m_irrigation.create_schedule
+      data:
+        name: "{{ states('input_text.schedule_name') }}"
+        valve: "{{ states('input_select.schedule_valve') }}"
+        schedule_type: "time_based"
+        times: >
+          {% set times = [] %}
+          {% if states('input_datetime.schedule_time_1') %}
+            {% set times = times + [states('input_datetime.schedule_time_1')] %}
+          {% endif %}
+          {% if states('input_datetime.schedule_time_2') != '18:00:00' %}
+            {% set times = times + [states('input_datetime.schedule_time_2')] %}
+          {% endif %}
+          {{ times }}
+        days_of_week: >
+          {% set days = [] %}
+          {% if is_state('input_boolean.schedule_monday', 'on') %}
+            {% set days = days + [0] %}
+          {% endif %}
+          {% if is_state('input_boolean.schedule_tuesday', 'on') %}
+            {% set days = days + [1] %}
+          {% endif %}
+          {% if is_state('input_boolean.schedule_wednesday', 'on') %}
+            {% set days = days + [2] %}
+          {% endif %}
+          {% if is_state('input_boolean.schedule_thursday', 'on') %}
+            {% set days = days + [3] %}
+          {% endif %}
+          {% if is_state('input_boolean.schedule_friday', 'on') %}
+            {% set days = days + [4] %}
+          {% endif %}
+          {% if is_state('input_boolean.schedule_saturday', 'on') %}
+            {% set days = days + [5] %}
+          {% endif %}
+          {% if is_state('input_boolean.schedule_sunday', 'on') %}
+            {% set days = days + [6] %}
+          {% endif %}
+          {{ days if days | length > 0 else none }}
+        run_type: "{{ states('input_select.schedule_run_type') }}"
+        run_value: >
+          {% if states('input_select.schedule_run_type') == 'duration' %}
+            {{ states('input_number.schedule_duration_minutes') | float }}
+          {% else %}
+            {{ states('input_number.schedule_volume_liters') | float }}
+          {% endif %}
+        conditions: >
+          {% set cond = {} %}
+          {% if states('input_text.schedule_moisture_sensor') | length > 0 %}
+            {% set cond = dict(cond, **{'soil_moisture_entity': states('input_text.schedule_moisture_sensor'), 'max_moisture': states('input_number.schedule_max_moisture') | int}) %}
+          {% endif %}
+          {% if states('input_number.schedule_min_temp') | float > 0 %}
+            {% set cond = dict(cond, **{'min_temp': states('input_number.schedule_min_temp') | float}) %}
+          {% endif %}
+          {% if states('input_number.schedule_max_temp') | float < 50 %}
+            {% set cond = dict(cond, **{'max_temp': states('input_number.schedule_max_temp') | float}) %}
+          {% endif %}
+          {% if is_state('input_boolean.schedule_skip_if_rain', 'on') %}
+            {% set cond = dict(cond, **{'skip_if_rain': true}) %}
+          {% endif %}
+          {{ cond if cond | length > 0 else {} }}
+        enabled: true
+    - action: persistent_notification.create
+      data:
+        title: "Schedule Created"
+        message: "Time-based schedule '{{ states('input_text.schedule_name') }}' has been created successfully!"
+
+create_interval_schedule:
+  alias: Create Interval Schedule
+  icon: mdi:timer-plus
+  mode: single
+  sequence:
+    - action: z2m_irrigation.create_schedule
+      data:
+        name: "{{ states('input_text.schedule_name') }}"
+        valve: "{{ states('input_select.schedule_valve') }}"
+        schedule_type: "interval"
+        interval_hours: "{{ states('input_number.schedule_interval_hours') | int }}"
+        run_type: "{{ states('input_select.schedule_run_type') }}"
+        run_value: >
+          {% if states('input_select.schedule_run_type') == 'duration' %}
+            {{ states('input_number.schedule_duration_minutes') | float }}
+          {% else %}
+            {{ states('input_number.schedule_volume_liters') | float }}
+          {% endif %}
+        conditions: >
+          {% set cond = {} %}
+          {% if states('input_text.schedule_moisture_sensor') | length > 0 %}
+            {% set cond = dict(cond, **{'soil_moisture_entity': states('input_text.schedule_moisture_sensor'), 'max_moisture': states('input_number.schedule_max_moisture') | int}) %}
+          {% endif %}
+          {% if states('input_number.schedule_min_temp') | float > 0 %}
+            {% set cond = dict(cond, **{'min_temp': states('input_number.schedule_min_temp') | float}) %}
+          {% endif %}
+          {% if states('input_number.schedule_max_temp') | float < 50 %}
+            {% set cond = dict(cond, **{'max_tp': states('input_number.schedule_max_temp') | float}) %}
+          {% endif %}
+          {% if is_state('input_boolean.schedule_skip_if_rain', 'on') %}
+            {% set cond = dict(cond, **{'skip_if_rain': true}) %}
+          {% endif %}
+          {{ cond if cond | length > 0 else {} }}
+        enabled: true
+    - action: persistent_notification.create
+      data:
+        title: "Schedule Created"
+        message: "Interval schedule '{{ states('input_text.schedule_name') }}' has been created successfully!"
