@@ -2,6 +2,71 @@
 
 All notable changes to the Z2M Irrigation integration will be documented in this file.
 
+## [3.1.1] - 2026-04-07
+
+### 🐛 Hotfix — orphan recovery: defer side-effects until HA fully started
+
+Real-world deployment of v3.1.0 against a production HA box found two related
+bugs in `_recover_orphaned_sessions()`. Both have the same root cause and
+both are fixed here.
+
+#### What was wrong
+
+`_recover_orphaned_sessions()` runs during `async_start()`, which executes
+while Home Assistant is still in `CoreState.starting`. At that point:
+
+- The MQTT integration is loaded but its **client may not be connected yet**
+  — `mqtt.async_publish()` raises "The client is not currently connected".
+- The `persistent_notification` integration may not have registered its
+  service yet — `services.async_call("persistent_notification", "create", …)`
+  silently no-ops.
+
+The first deployment of v3.1.0 detected 91 legitimate orphan sessions
+(accumulated from months of HA restarts before the fix existed) and:
+
+- ✅ Successfully closed all 91 in the local SQLite DB.
+- ❌ All 91 force-OFF MQTT publishes failed with "client not connected".
+- ❌ The user-facing persistent notification was never created.
+
+No real-world harm because the valves were physically OFF anyway, but the
+**primary safety mechanism (force-OFF on restart) wasn't actually firing**
+when it was needed most.
+
+#### Fix — two-phase recovery
+
+`_recover_orphaned_sessions()` is now split:
+
+| Phase | When | What |
+|---|---|---|
+| **1 — DB cleanup** | `async_start()` (immediately) | Marks all orphan sessions as ended in the local SQLite DB. Pure local op, no external dependencies. |
+| **2 — Force-OFF + notification** | `EVENT_HOMEASSISTANT_STARTED` (deferred) | Dedupe orphans by valve_topic, publish OFF once per unique valve via MQTT, fire one event per valve, create one summary persistent notification. |
+
+The Phase 2 callback is registered via `hass.bus.async_listen_once()` for
+the normal boot path, OR scheduled immediately if HA is already running
+(config-reload edge case).
+
+#### Bonus fix — dedupe orphans by valve_topic
+
+The first v3.1.0 run logged ~91 OFF publishes for only 4 unique valves
+(Front Garden alone had ~30 orphan sessions, mostly from past restarts).
+Now we publish OFF **once per unique valve**, regardless of how many orphan
+sessions belonged to it.
+
+Persistent notification is also smarter: it shows up to 5 valve names
+inline, then "and N more" for larger counts.
+
+#### Files changed
+
+- `custom_components/z2m_irrigation/manager.py` — split recovery into two
+  phases; new imports for `CoreState` and `EVENT_HOMEASSISTANT_STARTED`.
+- `custom_components/z2m_irrigation/manifest.json` — bump to `3.1.1`.
+
+No schema changes. No new constants. No new behaviour outside the recovery
+path. The 5 guardrails, OFF retry chain, and at-target failsafe from v3.1.0
+are unchanged.
+
+---
+
 ## [3.1.0] - 2026-04-07
 
 ### 🛡️ Safety release — multi-layered failsafe, OFF retry, restart recovery

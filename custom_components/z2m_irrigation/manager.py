@@ -6,7 +6,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Iterable
 
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import CoreState, HomeAssistant, callback
 from homeassistant.components import mqtt
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
@@ -935,15 +936,28 @@ class ValveManager:
 
     # ─────────────────────────────────────────────────────────────────────
     # v3.1 — Safety: orphaned in-flight session recovery
+    # v3.1.1 — Two-phase: DB cleanup now, force-OFF + notification deferred
     # ─────────────────────────────────────────────────────────────────────
 
     async def _recover_orphaned_sessions(self) -> None:
         """Run once at startup. Find any sessions that were started but not
-        ended (HA crashed/restarted mid-run) and:
-          1. Force-publish OFF to the corresponding valve (best-effort).
-          2. Mark the session as ended in the DB with a placeholder result.
-          3. Fire an HA event so external automations can react.
-          4. Create a persistent notification so the user is informed.
+        ended (HA crashed/restarted mid-run) and reconcile them in two phases:
+
+        PHASE 1 (synchronous, runs during async_start):
+          - Mark every orphan session as ended in the local DB.
+
+        PHASE 2 (deferred to EVENT_HOMEASSISTANT_STARTED):
+          - Dedupe orphans by valve_topic.
+          - Publish OFF once per unique valve via MQTT.
+          - Fire one EVENT_ORPHANED_SESSION_RECOVERED event per unique valve.
+          - Create a single persistent notification summarising the recovery.
+
+        Why two phases (v3.1.1 fix):
+          During async_start, neither the MQTT integration nor the
+          persistent_notification service are necessarily ready yet, so any
+          attempt to use them at that point silently fails. Phase 2 waits for
+          HA to be fully booted before performing the actions that depend on
+          other integrations.
 
         This is the safest possible behavior: after a restart we cannot know
         the physical state of the valves, so we assume the worst and force
@@ -960,39 +974,20 @@ class ValveManager:
             return
 
         _LOGGER.warning(
-            "⚠️  Found %d orphaned in-flight session(s) at startup — forcing OFF "
-            "and closing them out for safety",
+            "⚠️  Found %d orphaned in-flight session(s) at startup — closing them "
+            "in DB now; force-OFF and notification deferred until HA fully started",
             len(orphans),
         )
 
+        # ─────────────────────────────────────────────────────────────────
+        # PHASE 1 — DB cleanup (safe to do during async_start)
+        #
+        # We mark every orphan as ended in the local SQLite DB right now. This
+        # is a pure local operation that doesn't depend on any other HA
+        # integration, so it's safe to run during async_start.
+        # ─────────────────────────────────────────────────────────────────
         for o in orphans:
             session_id = o.get("session_id")
-            valve_topic = o.get("valve_topic")
-            valve_name = o.get("valve_name") or valve_topic
-            started_at = o.get("started_at")
-            target_liters = o.get("target_liters")
-            target_minutes = o.get("target_minutes")
-
-            # Best-effort force OFF. We may not have an MQTT subscription
-            # established yet (we're called before _ensure_valve), but the
-            # publish itself only needs the MQTT integration to be loaded.
-            try:
-                await self.async_turn_off(valve_topic)
-                _LOGGER.warning(
-                    "🛑 Recovery: published OFF for orphaned valve %s "
-                    "(session %s started at %s, target=%sL/%smin)",
-                    valve_topic, session_id, started_at,
-                    target_liters, target_minutes,
-                )
-            except Exception as e:
-                _LOGGER.error(
-                    "Recovery: failed to publish OFF for orphaned valve %s: %s",
-                    valve_topic, e,
-                )
-
-            # Mark the session as ended in the DB so it doesn't keep showing
-            # up as in-flight. We use placeholder values because we have no
-            # way to know how much actually flowed after HA went down.
             try:
                 await self.db.end_session(
                     session_id,
@@ -1006,32 +1001,97 @@ class ValveManager:
                     session_id, e,
                 )
 
-            # Fire an HA event so external automations can react (e.g., notify
-            # the user, send a Slack message, etc.)
-            self.hass.bus.async_fire(
-                EVENT_ORPHANED_SESSION_RECOVERED,
-                {
-                    "valve": valve_topic,
-                    "name": valve_name,
-                    "session_id": session_id,
-                    "started_at": started_at,
-                    "target_liters": target_liters,
-                    "target_minutes": target_minutes,
-                },
+        # ─────────────────────────────────────────────────────────────────
+        # PHASE 2 — force-OFF + notification (deferred to STARTED)
+        #
+        # The MQTT integration and the persistent_notification service are
+        # NOT yet available during async_start (this was a v3.1.0 bug —
+        # see PR#2 follow-up). We defer the actions that need them until
+        # the EVENT_HOMEASSISTANT_STARTED event fires, which is when HA is
+        # fully booted and all integrations are ready.
+        #
+        # We also dedupe by valve_topic at this point — the v3.1.0 release
+        # had a case where 91 orphaned sessions across 4 valves resulted in
+        # 91 redundant OFF publishes. Now we publish OFF once per unique
+        # valve, regardless of how many orphan sessions belonged to it.
+        # ─────────────────────────────────────────────────────────────────
+        unique_topics: Dict[str, str] = {}  # topic -> friendly name
+        for o in orphans:
+            topic = o.get("valve_topic")
+            if topic and topic not in unique_topics:
+                unique_topics[topic] = o.get("valve_name") or topic
+
+        async def _deferred_off_and_notify(_event=None) -> None:
+            _LOGGER.warning(
+                "🛑 HA started — running deferred orphan recovery: force-OFF for "
+                "%d unique valve(s) (from %d orphan session(s))",
+                len(unique_topics), len(orphans),
+            )
+            for topic, name in unique_topics.items():
+                try:
+                    await self.async_turn_off(topic)
+                    _LOGGER.warning(
+                        "🛑 Recovery: published OFF for orphaned valve %s (deferred)",
+                        topic,
+                    )
+                except Exception as e:
+                    _LOGGER.error(
+                        "Recovery: failed to publish deferred OFF for %s: %s",
+                        topic, e,
+                    )
+                # Fire one event per unique valve.
+                self.hass.bus.async_fire(
+                    EVENT_ORPHANED_SESSION_RECOVERED,
+                    {
+                        "valve": topic,
+                        "name": name,
+                        "deferred": True,
+                        "orphan_count": sum(
+                            1 for o in orphans if o.get("valve_topic") == topic
+                        ),
+                    },
+                )
+
+            # Persistent notification — summarise. Cap the names list at 5
+            # to keep the notification readable for large orphan counts.
+            names_list = list(unique_topics.values())
+            if len(names_list) <= 5:
+                names_str = ", ".join(names_list)
+            else:
+                names_str = ", ".join(names_list[:5]) + f", and {len(names_list) - 5} more"
+
+            self._create_persistent_notification(
+                title="🛡️ z2m_irrigation: orphaned sessions recovered",
+                message=(
+                    f"At startup, **{len(orphans)}** irrigation session(s) across "
+                    f"**{len(unique_topics)}** valve(s) were found in an in-flight "
+                    f"state. This means Home Assistant restarted while irrigation "
+                    f"was running, OR these sessions accumulated from past "
+                    f"restarts before v3.1.\n\n"
+                    f"Affected valves: **{names_str}**\n\n"
+                    f"All affected valves have been sent a force-OFF command. "
+                    f"Please verify physically that the valves have actually "
+                    f"closed and that no over-watering occurred."
+                ),
+                notification_id="z2m_irrigation_orphan_recovery",
             )
 
-        # Create a persistent notification summarising the recovery.
-        names = ", ".join(o.get("valve_name") or o.get("valve_topic") for o in orphans)
-        self._create_persistent_notification(
-            title="🛡️ z2m_irrigation: orphaned sessions recovered",
-            message=(
-                f"At startup, **{len(orphans)}** irrigation session(s) were found "
-                f"in an in-flight state, meaning Home Assistant restarted while "
-                f"irrigation was running.\n\n"
-                f"Affected valves: **{names}**\n\n"
-                f"All affected valves have been sent a force-OFF command. "
-                f"Please verify physically that the valves have actually closed "
-                f"and that no over-watering occurred during the restart window."
-            ),
-            notification_id="z2m_irrigation_orphan_recovery",
-        )
+        # Register the deferred handler. Two cases:
+        #
+        # (a) Normal HA boot: we're called from async_start which runs while
+        #     CoreState is "starting". Listen for EVENT_HOMEASSISTANT_STARTED
+        #     which fires when HA finishes booting all integrations.
+        #
+        # (b) Config reload (rare): the integration is being re-set up while
+        #     HA is already running. In this case STARTED has already fired
+        #     and won't fire again, so we run the deferred work right away.
+        if self.hass.state == CoreState.running:
+            _LOGGER.debug("HA already running — running deferred recovery now")
+            self._schedule_task(_deferred_off_and_notify())
+        else:
+            _LOGGER.debug(
+                "Registered deferred orphan recovery for EVENT_HOMEASSISTANT_STARTED"
+            )
+            self.hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_STARTED, _deferred_off_and_notify
+            )
