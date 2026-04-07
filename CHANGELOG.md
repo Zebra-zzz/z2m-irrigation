@@ -2,6 +2,120 @@
 
 All notable changes to the Z2M Irrigation integration will be documented in this file.
 
+## [3.1.0] - 2026-04-07
+
+### 🛡️ Safety release — multi-layered failsafe, OFF retry, restart recovery
+
+This is a **safety-critical** release. The previous control loop had several
+failure modes that could leave a valve running unbounded — see
+[`AUDIT-2026-04-07.md`](./AUDIT-2026-04-07.md) for the full pre-fix audit.
+
+All changes are surgical and contained to `manager.py`, `database.py`,
+`const.py`, and the manifest. **No schema changes** to the SQLite database;
+the new safety paths reuse the existing `sessions` table's `ended_at IS NULL`
+semantics to identify in-flight sessions.
+
+#### 🐛 Bugs fixed
+
+- **CRITICAL — Volume target lost on HA restart.** Previously, if HA was
+  restarted while a valve was physically open, the next MQTT `state: ON` from
+  the device created a new in-memory session with `target_liters=None`, and
+  the failsafe never fired. The valve could run unbounded until manual
+  intervention.
+- **CRITICAL — Runaway after primary failsafe.** Previously, when the at-target
+  failsafe fired, it published OFF once with no retry, and immediately cleared
+  `target_liters`. If the device failed to actually close (lost MQTT command,
+  Zigbee delivery failure, firmware quirk), `session_liters` kept climbing
+  indefinitely with no further failsafe — consistent with the user-reported
+  "800 L target → 2000–3000 L actual" runaway.
+- **CRITICAL — No MQTT-independent failsafe.** Previously, the at-target check
+  ran ONLY inside `_on_state` (the MQTT message handler). If the device went
+  silent (Zigbee dropout, dead battery), the failsafe never fired regardless
+  of how much time had elapsed.
+- **HIGH — No retry / verification of OFF.** Previously, OFF was published
+  once with QoS 1 (broker-delivery only), with no acknowledgement check and
+  no retry.
+
+#### ✨ New: 5-layer safety guardrail loop
+
+A new periodic loop runs every `GUARDRAIL_CHECK_INTERVAL_SECONDS` (30s) and
+inspects every active session, completely independently of MQTT messages:
+
+| Layer | What it catches | Default threshold |
+|---|---|---|
+| **1 — Volume overshoot** | Primary failsafe sent OFF but device kept flowing past target | `> target × 1.25` |
+| **2 — Stuck flow** | Valve never opened, or flow sensor broken / reporting zero | `> 10 min` with no liter progress |
+| **3 — MQTT silence** | Device went offline mid-run (Zigbee dropout, dead battery) | `> 5 min` since last MQTT msg |
+| **4 — Expected duration warning** *(informational)* | Run is taking 50% longer than the historical average — possible clogged filter or pressure drop | `> historical_avg × 1.5` |
+| **5 — Cross-restart recovery** | HA restarted mid-irrigation; orphaned session in DB | At every startup |
+
+Layers 1–3 trigger the new shutoff retry chain. Layer 4 is informational only
+(logs a warning + fires a HA event but does NOT force OFF). Layer 5 runs once
+at startup, force-publishes OFF to all valves with orphaned in-flight
+sessions, marks the sessions as completed in the DB, and creates a persistent
+notification for the user.
+
+All thresholds live in `const.py` and can be tuned without code changes.
+
+#### ✨ New: OFF retry / confirmation state machine
+
+When ANY guardrail (or the primary at-target failsafe) decides a valve must
+shut off, the new `_initiate_shutoff()` / `_attempt_shutoff()` chain takes
+ownership of the valve until the device confirms `state: OFF` or the retry
+budget is exhausted. Schedule:
+
+| Elapsed | Action |
+|---|---|
+| `T+0s` | Publish OFF (attempt 1) |
+| `T+3s` | If still ON, publish OFF (attempt 2) |
+| `T+8s` | If still ON, publish OFF (attempt 3) |
+| `T+15s` | If still ON, publish OFF (attempt 4) — log WARNING |
+| `T+30s` | If still ON, publish OFF (attempt 5) — **persistent notification** |
+| `T+60s` → `T+300s` | Periodic retries |
+| `T+300s` | Give up — fire `z2m_irrigation_shutoff_failed` event + **CRITICAL persistent notification** |
+
+When the device finally reports `state: OFF`, the `EVENT_SHUTOFF_CONFIRMED`
+event fires and the chain cleanly tears down. Idempotent: a second
+`_initiate_shutoff` call while one is already in progress is silently ignored.
+
+#### ✨ New: HA bus events for automation hooks
+
+Three new HA events are fired so users can hook them in automations
+(notifications, escalation, dashboards, etc.):
+
+- `z2m_irrigation_shutoff_initiated` — fired when any guardrail/failsafe decides to OFF a valve
+- `z2m_irrigation_shutoff_confirmed` — fired when the device finally confirms OFF
+- `z2m_irrigation_shutoff_failed` — fired only after the entire 5-minute retry budget is exhausted
+- `z2m_irrigation_orphaned_session_recovered` — fired at startup for each orphaned session found
+
+#### ✨ New: Database method `get_in_flight_sessions()`
+
+Added to `database.py` to support startup recovery. No schema changes — uses
+the existing `WHERE ended_at IS NULL` query against the `sessions` table.
+
+Also added `get_recent_avg_flow()` to support Layer 4 (expected duration
+warning) — queries the last N completed sessions for a valve.
+
+#### 🚧 Known issue (will be addressed in 3.1.1)
+
+The duplicate session-end log line observed when manually toggling a valve
+off (`Session ending ... 0.00min, 0.00L, 1.67lpm`) is a separate state-flap
+issue — the device briefly toggles `state: ON → OFF → ON → OFF` in response
+to the OFF command, which creates a second 60ms-long phantom session in the
+DB. Cosmetic only, not a safety issue. Tracked separately.
+
+#### 🛠️ Other changes
+
+- `start_timed()` failsafe backup timer now also routes through the new
+  retry chain instead of publishing OFF once.
+- Added `recovered_from_orphan` field on `Valve` (currently used for log
+  labelling only).
+- All new constants are in `const.py` for easy tuning.
+- Added [`AUDIT-2026-04-07.md`](./AUDIT-2026-04-07.md) — the full pre-fix
+  audit and bug analysis.
+
+---
+
 ## [3.0.6] - 2025-11-05
 
 ### 🐛 Critical Fix - Timezone Required for Last Session Start

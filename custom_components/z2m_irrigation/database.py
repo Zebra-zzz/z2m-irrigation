@@ -566,6 +566,86 @@ class IrrigationDatabase:
                 _LOGGER.error(f"❌ Error getting last session end: {e}", exc_info=True)
                 return None
 
+    # ─────────────────────────────────────────────────────────────────────
+    # v3.1 — Safety: in-flight session recovery support
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def get_in_flight_sessions(self) -> List[Dict]:
+        """Return all sessions where ended_at IS NULL.
+
+        These are sessions that were started but never recorded as ended —
+        typically because HA crashed or was restarted mid-run. The startup
+        recovery path uses this to identify orphaned sessions that need to be
+        force-closed for safety.
+        """
+        _LOGGER.debug("💾 [DB] ➡️ get_in_flight_sessions")
+        result = await self.hass.async_add_executor_job(self._get_in_flight_sessions_sync)
+        _LOGGER.debug(f"💾 [DB] ⬅️ get_in_flight_sessions found {len(result)} orphan(s)")
+        return result
+
+    def _get_in_flight_sessions_sync(self) -> List[Dict]:
+        if not self._conn:
+            return []
+        with self._lock:
+            try:
+                cursor = self._conn.execute("""
+                    SELECT session_id, valve_topic, valve_name, started_at,
+                           target_liters, target_minutes, trigger_type
+                    FROM sessions
+                    WHERE ended_at IS NULL
+                    ORDER BY started_at ASC
+                """)
+                try:
+                    rows = cursor.fetchall()
+                    return [dict(r) for r in rows]
+                finally:
+                    cursor.close()
+            except Exception as e:
+                _LOGGER.error(f"❌ Error querying in-flight sessions: {e}", exc_info=True)
+                return []
+
+    async def get_recent_avg_flow(self, valve_topic: str,
+                                  lookback: int = 5) -> Optional[float]:
+        """Return the average flow rate (L/min) of the most recent N completed
+        sessions for this valve, or None if no history is available. Used by
+        Guardrail Layer 4 to compute an expected-duration warning threshold.
+        """
+        _LOGGER.debug(f"💾 [DB] ➡️ get_recent_avg_flow: {valve_topic} (last {lookback})")
+        result = await self.hass.async_add_executor_job(
+            self._get_recent_avg_flow_sync, valve_topic, lookback
+        )
+        _LOGGER.debug(f"💾 [DB] ⬅️ get_recent_avg_flow result: {result}")
+        return result
+
+    def _get_recent_avg_flow_sync(self, valve_topic: str,
+                                   lookback: int) -> Optional[float]:
+        if not self._conn:
+            return None
+        with self._lock:
+            try:
+                cursor = self._conn.execute("""
+                    SELECT avg_flow_rate
+                    FROM sessions
+                    WHERE valve_topic = ?
+                      AND ended_at IS NOT NULL
+                      AND avg_flow_rate IS NOT NULL
+                      AND avg_flow_rate > 0
+                      AND volume_liters > 0
+                    ORDER BY ended_at DESC
+                    LIMIT ?
+                """, (str(valve_topic), int(lookback)))
+                try:
+                    rows = cursor.fetchall()
+                    if not rows:
+                        return None
+                    flows = [float(r["avg_flow_rate"]) for r in rows]
+                    return sum(flows) / len(flows)
+                finally:
+                    cursor.close()
+            except Exception as e:
+                _LOGGER.error(f"❌ Error querying recent avg flow: {e}", exc_info=True)
+                return None
+
     async def cleanup_old_sessions(self, days: int = 90):
         """Clean up sessions older than specified days"""
         return await self.hass.async_add_executor_job(
