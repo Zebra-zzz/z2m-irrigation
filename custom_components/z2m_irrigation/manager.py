@@ -19,6 +19,19 @@ from .const import (
     SIG_NEW_VALVE,
     Z2M_MODEL,
     sig_update,
+    # v3.1 — Safety guardrails
+    GUARDRAIL_CHECK_INTERVAL_SECONDS,
+    GUARDRAIL_OVERSHOOT_RATIO,
+    GUARDRAIL_STUCK_FLOW_TIMEOUT_SECONDS,
+    GUARDRAIL_MQTT_SILENCE_TIMEOUT_SECONDS,
+    GUARDRAIL_EXPECTED_DURATION_WARN_RATIO,
+    HISTORICAL_FLOW_LOOKBACK_SESSIONS,
+    OFF_RETRY_SCHEDULE_SECONDS,
+    OFF_RETRY_MAX_DURATION_SECONDS,
+    EVENT_SHUTOFF_INITIATED,
+    EVENT_SHUTOFF_CONFIRMED,
+    EVENT_SHUTOFF_FAILED,
+    EVENT_ORPHANED_SESSION_RECOVERED,
 )
 from .database import IrrigationDatabase
 
@@ -54,6 +67,39 @@ class Valve:
     last_session_start: Optional[str] = None  # ISO datetime of last session start
     last_session_end: Optional[str] = None  # ISO datetime of last session end
 
+    # ───────────────────────────────────────────────────────────────────
+    # v3.1 — Safety guardrail tracking (none persisted; recomputed at runtime)
+    # ───────────────────────────────────────────────────────────────────
+
+    # Set when any guardrail (or the primary failsafe) decides this valve must
+    # turn OFF. While True, the periodic guardrail loop will not re-fire for
+    # this valve, and the OFF retry chain manages re-publishing OFF until the
+    # device confirms with state=OFF or the retry budget is exhausted.
+    shutoff_in_progress: bool = False
+    shutoff_reason: str = ""           # human-readable reason
+    shutoff_attempt: int = 0           # number of OFF publishes so far
+    shutoff_started_ts: float = 0.0    # monotonic time the chain started
+    shutoff_cancel_handle: Optional[Callable[[], None]] = None  # next-step timer
+
+    # Tracks when session_liters last increased — used by Guardrail Layer 2
+    # (stuck-flow detection). Reset whenever a new session starts.
+    last_progress_ts: float = 0.0
+    last_progress_value: float = 0.0
+
+    # Pre-computed at start_liters: target_liters / historical_avg_flow * 1.5.
+    # Used by Guardrail Layer 4 (expected-duration warning). None means no
+    # historical data was available, so the warning is skipped.
+    expected_duration_min: Optional[float] = None
+
+    # Whether we have already emitted the Layer 4 warning for the current
+    # session. Avoids spam.
+    expected_duration_warned: bool = False
+
+    # Whether this session was recovered from a previous HA boot (i.e., it's
+    # a brand-new session being created after an in-flight session was found
+    # at startup). Currently only used for log labelling.
+    recovered_from_orphan: bool = False
+
 class ValveManager:
     def __init__(
         self,
@@ -82,6 +128,13 @@ class ValveManager:
         # Initialize local database
         await self.db.async_init()
 
+        # v3.1 — Recover from any orphaned in-flight sessions left over from a
+        # previous boot (HA restart, crash, OS reboot mid-irrigation). This
+        # MUST happen before we subscribe to MQTT, so that any device state
+        # we receive afterwards is treated as a fresh new session and not
+        # mistakenly merged with a stale orphan record.
+        await self._recover_orphaned_sessions()
+
         # Subscriptions for device list (two possible topics)
         self._unsubs.append(
             await mqtt.async_subscribe(self.hass, f"{self.base}/bridge/devices", self._on_devices)
@@ -102,6 +155,21 @@ class ValveManager:
             )
         )
         _LOGGER.debug("Started periodic 24h/7d sensor refresh (every 15 minutes)")
+
+        # v3.1 — Start the safety guardrail loop. Independent of MQTT, this
+        # tick periodically inspects every active session and forces OFF if
+        # any of the five guardrails detect a runaway condition.
+        self._unsubs.append(
+            async_track_time_interval(
+                self.hass,
+                self._guardrail_tick,
+                timedelta(seconds=GUARDRAIL_CHECK_INTERVAL_SECONDS),
+            )
+        )
+        _LOGGER.info(
+            "🛡️  Safety guardrail loop started (every %ds)",
+            GUARDRAIL_CHECK_INTERVAL_SECONDS,
+        )
 
         # Ask Z2M to send the device list (ignore if MQTT not ready)
         try:
@@ -234,19 +302,28 @@ class ValveManager:
                 v.session_liters += liters
                 v.total_liters += liters
                 v.total_minutes += dt / 60.0
+                # v3.1 — Track liter progress for Guardrail Layer 2 (stuck flow).
+                v.last_progress_ts = now
+                v.last_progress_value = v.session_liters
 
         # FAILSAFE: Check targets even when valve is ON (not just during session_active)
-        # This ensures we catch cases where device fails to stop
-        if v.state == "ON":
+        # This ensures we catch cases where device fails to stop.
+        # v3.1 — Skip the at-target failsafe entirely if a shutoff is already
+        # in progress; the OFF retry chain owns the valve until confirmed.
+        if v.state == "ON" and not v.shutoff_in_progress:
             # FAILSAFE: Check if volume target reached (backup to native device control)
             if v.target_liters and v.target_liters > 0:
                 if v.session_liters >= v.target_liters:
                     _LOGGER.warning(
-                        "FAILSAFE: Volume target reached for %s: %.2f/%.2f L - forcing OFF",
+                        "FAILSAFE: Volume target reached for %s: %.2f/%.2f L - initiating shutoff",
                         topic, v.session_liters, v.target_liters
                     )
-                    self._schedule_task(self.async_turn_off(topic))
-                    v.target_liters = None  # Clear target to prevent repeated triggers
+                    # v3.1 — Hand off to the shutoff state machine instead of
+                    # publishing OFF once and clearing target_liters. The
+                    # state machine will retry OFF until confirmed and only
+                    # then clean up. target_liters stays set so guardrails
+                    # remain meaningful.
+                    self._initiate_shutoff(v, "volume_target_reached")
                     return
                 else:
                     # Debug log to see progress
@@ -256,17 +333,34 @@ class ValveManager:
                         (v.session_liters / v.target_liters * 100), v.flow_lpm
                     )
 
+                    # v3.1 — Layer 4: warn if elapsed exceeds expected duration.
+                    if (
+                        v.expected_duration_min is not None
+                        and not v.expected_duration_warned
+                        and v.session_start_ts > 0
+                    ):
+                        elapsed_min = (now - v.session_start_ts) / 60.0
+                        if elapsed_min > v.expected_duration_min:
+                            v.expected_duration_warned = True
+                            _LOGGER.warning(
+                                "⏱️  Run for %s is taking longer than expected: "
+                                "elapsed=%.1fmin, expected≤%.1fmin, progress=%.2f/%.2f L. "
+                                "Possible degraded flow (clog, pressure drop). "
+                                "Will continue until target or other guardrail fires.",
+                                topic, elapsed_min, v.expected_duration_min,
+                                v.session_liters, v.target_liters,
+                            )
+
             # FAILSAFE: Check if time target reached (backup to native device control)
             if v.session_end_ts and v.session_start_ts > 0:
                 if now >= v.session_end_ts:
                     elapsed_min = (now - v.session_start_ts) / 60.0
                     target_min = (v.session_end_ts - v.session_start_ts) / 60.0
                     _LOGGER.warning(
-                        "FAILSAFE: Time target reached for %s: %.2f/%.2f min - forcing OFF",
+                        "FAILSAFE: Time target reached for %s: %.2f/%.2f min - initiating shutoff",
                         topic, elapsed_min, target_min
                     )
-                    self._schedule_task(self.async_turn_off(topic))
-                    v.session_end_ts = None  # Clear target to prevent repeated triggers
+                    self._initiate_shutoff(v, "time_target_reached")
                     return
 
         # state transitions
@@ -280,6 +374,10 @@ class ValveManager:
                     v.session_start_ts = now
                     v.session_liters = 0.0
                     v.session_count += 1
+                    # v3.1 — Initialize Layer 2 (stuck-flow) progress tracking.
+                    v.last_progress_ts = now
+                    v.last_progress_value = 0.0
+                    v.expected_duration_warned = False
                     # Generate session ID immediately before valve can turn off
                     from datetime import datetime
                     v.current_session_id = f"{v.topic}_{datetime.now().timestamp()}"
@@ -292,6 +390,35 @@ class ValveManager:
                     )
             else:
                 new_state = "OFF"
+                # v3.1 — If a shutoff was in progress, the device has now
+                # confirmed OFF. Clear the retry chain and fire a confirmation
+                # event for any external automations listening.
+                if v.shutoff_in_progress:
+                    elapsed = now - v.shutoff_started_ts if v.shutoff_started_ts > 0 else 0.0
+                    _LOGGER.info(
+                        "✅ Shutoff confirmed for %s (reason=%s, attempts=%d, elapsed=%.1fs)",
+                        topic, v.shutoff_reason, v.shutoff_attempt, elapsed,
+                    )
+                    self.hass.bus.async_fire(
+                        EVENT_SHUTOFF_CONFIRMED,
+                        {
+                            "valve": topic,
+                            "name": v.name,
+                            "reason": v.shutoff_reason,
+                            "attempts": v.shutoff_attempt,
+                            "elapsed_seconds": round(elapsed, 1),
+                        },
+                    )
+                    if v.shutoff_cancel_handle:
+                        try:
+                            v.shutoff_cancel_handle()
+                        except Exception:
+                            pass
+                        v.shutoff_cancel_handle = None
+                    v.shutoff_in_progress = False
+                    v.shutoff_reason = ""
+                    v.shutoff_attempt = 0
+                    v.shutoff_started_ts = 0.0
                 if v.session_active:
                     session_duration = (now - v.session_start_ts) / 60.0
                     avg_flow = v.session_liters / session_duration if session_duration > 0 else 0
@@ -465,6 +592,23 @@ class ValveManager:
         v.session_end_ts = None
         v.trigger_type = "volume"
 
+        # v3.1 — Reset shutoff/guardrail tracking (in case a previous shutoff
+        # left dangling state), and pre-compute the expected duration for
+        # Layer 4 from historical flow data.
+        v.shutoff_in_progress = False
+        v.shutoff_reason = ""
+        v.shutoff_attempt = 0
+        v.shutoff_started_ts = 0.0
+        if v.shutoff_cancel_handle:
+            try:
+                v.shutoff_cancel_handle()
+            except Exception:
+                pass
+            v.shutoff_cancel_handle = None
+        v.expected_duration_min = None
+        v.expected_duration_warned = False
+        self._schedule_task(self._compute_expected_duration(v, v.target_liters))
+
         _LOGGER.info("Starting volume run: %s for %.2f L (HA monitoring)", topic, liters)
 
         # NOTE: Sonoff SWV clears cyclic_quantitative_irrigation immediately after starting
@@ -505,10 +649,389 @@ class ValveManager:
         # FAILSAFE: Set HA-side backup timer in case device doesn't respond
         # This timer will fire if device fails to turn off at target time
         async def _off(_):
-            _LOGGER.warning("FAILSAFE: Backup timer expired for %s - forcing OFF", topic)
-            await self.async_turn_off(topic)
+            _LOGGER.warning("FAILSAFE: Backup timer expired for %s - initiating shutoff", topic)
+            # v3.1 — Hand off to the retry-aware shutoff machine.
+            self._initiate_shutoff(v, "timed_run_backup_timer")
             if v.cancel_handle:
                 v.cancel_handle(); v.cancel_handle = None
             v.session_end_ts = None
 
         v.cancel_handle = async_call_later(self.hass, run_s, _off)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # v3.1 — Safety: shutoff retry state machine
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _initiate_shutoff(self, v: Valve, reason: str) -> None:
+        """Begin the shutoff retry chain for a valve.
+
+        Idempotent: if a shutoff is already in progress for this valve, the new
+        request is ignored (the existing chain will run to completion). The
+        retry chain publishes OFF, waits, re-checks state, and re-publishes
+        with escalating notifications until the device confirms OFF or the
+        retry budget is exhausted.
+        """
+        if v.shutoff_in_progress:
+            _LOGGER.debug(
+                "Shutoff already in progress for %s (reason=%s); ignoring new request (reason=%s)",
+                v.topic, v.shutoff_reason, reason,
+            )
+            return
+
+        v.shutoff_in_progress = True
+        v.shutoff_reason = reason
+        v.shutoff_attempt = 0
+        v.shutoff_started_ts = time.monotonic()
+
+        _LOGGER.warning(
+            "🛑 Initiating shutoff for %s (reason=%s, target=%.2fL, current=%.2fL)",
+            v.topic, reason,
+            v.target_liters or 0.0,
+            v.session_liters,
+        )
+        self.hass.bus.async_fire(
+            EVENT_SHUTOFF_INITIATED,
+            {
+                "valve": v.topic,
+                "name": v.name,
+                "reason": reason,
+                "target_liters": v.target_liters,
+                "session_liters": round(v.session_liters, 2),
+            },
+        )
+
+        # First attempt is immediate; the chain schedules subsequent retries.
+        self._schedule_task(self._attempt_shutoff(v))
+
+    async def _attempt_shutoff(self, v: Valve) -> None:
+        """Publish OFF once and schedule the next retry checkpoint, if any.
+
+        Each call corresponds to one attempt. Determines the next checkpoint
+        from OFF_RETRY_SCHEDULE_SECONDS based on cumulative elapsed time, or
+        gives up and fires the failure event if the budget is exhausted.
+        """
+        if not v.shutoff_in_progress:
+            # Already confirmed OFF (state→OFF transition cleared the flag).
+            return
+
+        v.shutoff_attempt += 1
+        attempt = v.shutoff_attempt
+        elapsed = time.monotonic() - v.shutoff_started_ts
+
+        try:
+            await self.async_turn_off(v.topic)
+            _LOGGER.warning(
+                "🛑 Shutoff attempt #%d for %s published (elapsed=%.1fs, reason=%s)",
+                attempt, v.topic, elapsed, v.shutoff_reason,
+            )
+        except Exception as e:
+            _LOGGER.error(
+                "Shutoff attempt #%d for %s FAILED to publish: %s",
+                attempt, v.topic, e,
+            )
+
+        # Escalation by attempt count.
+        if attempt == 4:
+            _LOGGER.warning(
+                "⚠️  Valve %s has not confirmed OFF after %d attempts (%.1fs). Escalating.",
+                v.topic, attempt, elapsed,
+            )
+            self._create_persistent_notification(
+                title=f"⚠️ Irrigation valve not stopping: {v.name}",
+                message=(
+                    f"Valve **{v.name}** ({v.topic}) was asked to shut off "
+                    f"({v.shutoff_reason}) but has not confirmed after {attempt} attempts "
+                    f"over {elapsed:.0f} seconds. Will keep retrying. "
+                    f"Current session: {v.session_liters:.1f} L."
+                ),
+                notification_id=f"z2m_irrigation_shutoff_{v.topic}",
+            )
+
+        # Find the next checkpoint > elapsed.
+        next_checkpoint = None
+        for s in OFF_RETRY_SCHEDULE_SECONDS:
+            if s > elapsed:
+                next_checkpoint = s
+                break
+
+        if next_checkpoint is None or elapsed >= OFF_RETRY_MAX_DURATION_SECONDS:
+            # Give up — fire the critical failure event and persistent notification.
+            _LOGGER.error(
+                "🚨 GAVE UP on shutoff for %s after %d attempts over %.1fs. "
+                "Manual intervention required!",
+                v.topic, attempt, elapsed,
+            )
+            self.hass.bus.async_fire(
+                EVENT_SHUTOFF_FAILED,
+                {
+                    "valve": v.topic,
+                    "name": v.name,
+                    "reason": v.shutoff_reason,
+                    "attempts": attempt,
+                    "elapsed_seconds": round(elapsed, 1),
+                    "session_liters": round(v.session_liters, 2),
+                    "target_liters": v.target_liters,
+                },
+            )
+            self._create_persistent_notification(
+                title=f"🚨 CRITICAL: irrigation valve {v.name} won't stop",
+                message=(
+                    f"Valve **{v.name}** ({v.topic}) failed to acknowledge shutoff "
+                    f"after {attempt} attempts over {elapsed:.0f} seconds.\n\n"
+                    f"**Manual intervention required.** Check the device "
+                    f"(power, Zigbee connectivity), or close the water supply.\n\n"
+                    f"Reason: `{v.shutoff_reason}`\n"
+                    f"Session: {v.session_liters:.1f} L of {v.target_liters or 'unknown'} L target."
+                ),
+                notification_id=f"z2m_irrigation_shutoff_{v.topic}",
+            )
+            # Clear the in-progress flag so future shutoffs can be initiated.
+            # We do NOT clear target_liters / session_liters — the next MQTT
+            # message (if any) will integrate normally and the at-target
+            # failsafe in _on_state can fire again if appropriate.
+            v.shutoff_in_progress = False
+            v.shutoff_reason = ""
+            v.shutoff_attempt = 0
+            return
+
+        # Schedule the next attempt.
+        delay = max(0.1, next_checkpoint - elapsed)
+
+        async def _retry(_now):
+            await self._attempt_shutoff(v)
+
+        v.shutoff_cancel_handle = async_call_later(self.hass, delay, _retry)
+
+    def _create_persistent_notification(self, title: str, message: str,
+                                         notification_id: str) -> None:
+        """Helper to fire persistent_notification.create. Best-effort; failures
+        are swallowed because notifications must never block safety-critical
+        code paths."""
+        try:
+            self.hass.async_create_task(
+                self.hass.services.async_call(
+                    "persistent_notification",
+                    "create",
+                    {
+                        "title": title,
+                        "message": message,
+                        "notification_id": notification_id,
+                    },
+                    blocking=False,
+                )
+            )
+        except Exception as e:
+            _LOGGER.error("Failed to create persistent notification: %s", e)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # v3.1 — Safety: periodic guardrail loop
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def _guardrail_tick(self, now=None) -> None:
+        """Called every GUARDRAIL_CHECK_INTERVAL_SECONDS by HA's time tracker.
+
+        Iterates over every valve and runs the soft guardrail checks. Any
+        guardrail that fires triggers _initiate_shutoff(); the retry chain
+        and event firing happen there.
+        """
+        mono = time.monotonic()
+        for topic, v in list(self.valves.items()):
+            try:
+                # Skip valves that are not actively running, or where a
+                # shutoff is already underway.
+                if not v.session_active or v.shutoff_in_progress:
+                    continue
+                # Skip valves whose state isn't ON — if HA thinks the valve
+                # is OFF, there's nothing to guard against.
+                if v.state != "ON":
+                    continue
+
+                reason = self._check_guardrails_for_valve(v, mono)
+                if reason:
+                    _LOGGER.warning(
+                        "🛡️  Guardrail '%s' triggered for %s — initiating shutoff",
+                        reason, topic,
+                    )
+                    self._initiate_shutoff(v, reason)
+            except Exception as e:
+                _LOGGER.error(
+                    "Guardrail tick error for %s: %s", topic, e, exc_info=True,
+                )
+
+    def _check_guardrails_for_valve(self, v: Valve, now: float) -> Optional[str]:
+        """Run all guardrail checks for one valve. Returns the first failing
+        reason as a string, or None if all checks pass.
+
+        Layers:
+          1. Volume overshoot   — session_liters > target * GUARDRAIL_OVERSHOOT_RATIO
+          2. Stuck flow         — no liter progress in GUARDRAIL_STUCK_FLOW_TIMEOUT_SECONDS
+          3. MQTT silence       — no MQTT message in GUARDRAIL_MQTT_SILENCE_TIMEOUT_SECONDS
+          4. (Layer 4 is informational and lives inline in _on_state, not here.)
+        """
+        # Layer 1 — volume overshoot
+        if (
+            v.target_liters
+            and v.target_liters > 0
+            and v.session_liters > v.target_liters * GUARDRAIL_OVERSHOOT_RATIO
+        ):
+            return (
+                f"overshoot:{v.session_liters:.1f}L>{v.target_liters:.1f}L"
+                f"x{GUARDRAIL_OVERSHOOT_RATIO}"
+            )
+
+        # Layer 2 — stuck flow
+        # Only meaningful for volume runs that haven't reached target.
+        if (
+            v.target_liters
+            and v.target_liters > 0
+            and v.session_liters < v.target_liters
+            and v.last_progress_ts > 0
+        ):
+            stuck_for = now - v.last_progress_ts
+            if stuck_for >= GUARDRAIL_STUCK_FLOW_TIMEOUT_SECONDS:
+                return (
+                    f"stuck_flow:{stuck_for:.0f}s_at_{v.session_liters:.2f}L"
+                )
+
+        # Layer 3 — MQTT silence (any active session, regardless of trigger)
+        if v.last_ts > 0:
+            silent_for = now - v.last_ts
+            if silent_for >= GUARDRAIL_MQTT_SILENCE_TIMEOUT_SECONDS:
+                return f"mqtt_silence:{silent_for:.0f}s"
+
+        return None
+
+    async def _compute_expected_duration(self, v: Valve, target_liters: float) -> None:
+        """Set v.expected_duration_min from historical average flow rate. Used
+        by Layer 4 (the informational warning). If no history is available,
+        leaves expected_duration_min as None — Layer 4 will then be skipped
+        for this run."""
+        if not target_liters or target_liters <= 0:
+            v.expected_duration_min = None
+            return
+        try:
+            avg_flow = await self.db.get_recent_avg_flow(
+                v.topic, lookback=HISTORICAL_FLOW_LOOKBACK_SESSIONS
+            )
+        except Exception as e:
+            _LOGGER.debug("Could not compute expected duration for %s: %s", v.topic, e)
+            avg_flow = None
+
+        if avg_flow and avg_flow > 0:
+            base_min = target_liters / avg_flow
+            v.expected_duration_min = base_min * GUARDRAIL_EXPECTED_DURATION_WARN_RATIO
+            _LOGGER.debug(
+                "Expected duration for %s: target=%.1fL, avg_flow=%.2fL/min, "
+                "warn_at=%.1fmin (base %.1f * %.1f)",
+                v.topic, target_liters, avg_flow, v.expected_duration_min,
+                base_min, GUARDRAIL_EXPECTED_DURATION_WARN_RATIO,
+            )
+        else:
+            v.expected_duration_min = None
+            _LOGGER.debug(
+                "No flow history for %s — Layer 4 (expected duration) disabled for this run",
+                v.topic,
+            )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # v3.1 — Safety: orphaned in-flight session recovery
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def _recover_orphaned_sessions(self) -> None:
+        """Run once at startup. Find any sessions that were started but not
+        ended (HA crashed/restarted mid-run) and:
+          1. Force-publish OFF to the corresponding valve (best-effort).
+          2. Mark the session as ended in the DB with a placeholder result.
+          3. Fire an HA event so external automations can react.
+          4. Create a persistent notification so the user is informed.
+
+        This is the safest possible behavior: after a restart we cannot know
+        the physical state of the valves, so we assume the worst and force
+        them all closed. The user can manually restart irrigation if needed.
+        """
+        try:
+            orphans = await self.db.get_in_flight_sessions()
+        except Exception as e:
+            _LOGGER.error("Failed to query in-flight sessions on startup: %s", e)
+            return
+
+        if not orphans:
+            _LOGGER.debug("No orphaned in-flight sessions found at startup")
+            return
+
+        _LOGGER.warning(
+            "⚠️  Found %d orphaned in-flight session(s) at startup — forcing OFF "
+            "and closing them out for safety",
+            len(orphans),
+        )
+
+        for o in orphans:
+            session_id = o.get("session_id")
+            valve_topic = o.get("valve_topic")
+            valve_name = o.get("valve_name") or valve_topic
+            started_at = o.get("started_at")
+            target_liters = o.get("target_liters")
+            target_minutes = o.get("target_minutes")
+
+            # Best-effort force OFF. We may not have an MQTT subscription
+            # established yet (we're called before _ensure_valve), but the
+            # publish itself only needs the MQTT integration to be loaded.
+            try:
+                await self.async_turn_off(valve_topic)
+                _LOGGER.warning(
+                    "🛑 Recovery: published OFF for orphaned valve %s "
+                    "(session %s started at %s, target=%sL/%smin)",
+                    valve_topic, session_id, started_at,
+                    target_liters, target_minutes,
+                )
+            except Exception as e:
+                _LOGGER.error(
+                    "Recovery: failed to publish OFF for orphaned valve %s: %s",
+                    valve_topic, e,
+                )
+
+            # Mark the session as ended in the DB so it doesn't keep showing
+            # up as in-flight. We use placeholder values because we have no
+            # way to know how much actually flowed after HA went down.
+            try:
+                await self.db.end_session(
+                    session_id,
+                    duration_minutes=0.0,
+                    volume_liters=0.0,
+                    avg_flow_rate=0.0,
+                )
+            except Exception as e:
+                _LOGGER.error(
+                    "Recovery: failed to mark orphaned session %s as ended: %s",
+                    session_id, e,
+                )
+
+            # Fire an HA event so external automations can react (e.g., notify
+            # the user, send a Slack message, etc.)
+            self.hass.bus.async_fire(
+                EVENT_ORPHANED_SESSION_RECOVERED,
+                {
+                    "valve": valve_topic,
+                    "name": valve_name,
+                    "session_id": session_id,
+                    "started_at": started_at,
+                    "target_liters": target_liters,
+                    "target_minutes": target_minutes,
+                },
+            )
+
+        # Create a persistent notification summarising the recovery.
+        names = ", ".join(o.get("valve_name") or o.get("valve_topic") for o in orphans)
+        self._create_persistent_notification(
+            title="🛡️ z2m_irrigation: orphaned sessions recovered",
+            message=(
+                f"At startup, **{len(orphans)}** irrigation session(s) were found "
+                f"in an in-flight state, meaning Home Assistant restarted while "
+                f"irrigation was running.\n\n"
+                f"Affected valves: **{names}**\n\n"
+                f"All affected valves have been sent a force-OFF command. "
+                f"Please verify physically that the valves have actually closed "
+                f"and that no over-watering occurred during the restart window."
+            ),
+            notification_id="z2m_irrigation_orphan_recovery",
+        )
