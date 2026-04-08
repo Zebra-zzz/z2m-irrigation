@@ -4,7 +4,7 @@ import sqlite3
 import asyncio
 import threading
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List, Tuple
+from typing import Any, Optional, Dict, List, Tuple
 from pathlib import Path
 from homeassistant.core import HomeAssistant
 
@@ -645,6 +645,78 @@ class IrrigationDatabase:
             except Exception as e:
                 _LOGGER.error(f"❌ Error querying recent avg flow: {e}", exc_info=True)
                 return None
+
+    # ─────────────────────────────────────────────────────────────────────
+    # v4.0-alpha-4 — daily aggregation for the dashboard charts
+    #
+    # The dashboard's Insight tab needs per-day per-zone delivery for the
+    # last ~30 days. This method does the grouping in SQL (cheap; SQLite
+    # has native DATE() and aggregate functions) so the manager can read
+    # it on a 15-min cadence without scanning every row in Python.
+    #
+    # We bucket on `ended_at` rather than `started_at` so a session that
+    # spans midnight is attributed to the day it finished — which matches
+    # how a user typically thinks about "what watered today".
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def get_daily_breakdown(
+        self, valve_topic: str, days: int = 30
+    ) -> List[Dict[str, Any]]:
+        """Return per-day delivery for one valve, most-recent first.
+
+        Each row: {date, liters, minutes, sessions}. Days with no
+        sessions are NOT in the result — the consumer is expected to
+        zero-fill any missing dates.
+        """
+        return await self.hass.async_add_executor_job(
+            self._get_daily_breakdown_sync, valve_topic, days,
+        )
+
+    def _get_daily_breakdown_sync(
+        self, valve_topic: str, days: int
+    ) -> List[Dict[str, Any]]:
+        if not self._conn:
+            return []
+        if not valve_topic or not isinstance(valve_topic, str):
+            return []
+        with self._lock:
+            try:
+                cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+                cursor = self._conn.execute(
+                    """
+                    SELECT
+                        DATE(ended_at) AS day,
+                        COALESCE(SUM(volume_liters), 0) AS liters,
+                        COALESCE(SUM(duration_minutes), 0) AS minutes,
+                        COUNT(*) AS sessions
+                    FROM sessions
+                    WHERE valve_topic = ?
+                      AND ended_at IS NOT NULL
+                      AND ended_at >= ?
+                    GROUP BY DATE(ended_at)
+                    ORDER BY day DESC
+                    """,
+                    (str(valve_topic), str(cutoff)),
+                )
+                try:
+                    rows = cursor.fetchall()
+                    return [
+                        {
+                            "date": r["day"],
+                            "liters": round(float(r["liters"] or 0), 2),
+                            "minutes": round(float(r["minutes"] or 0), 2),
+                            "sessions": int(r["sessions"] or 0),
+                        }
+                        for r in rows
+                    ]
+                finally:
+                    cursor.close()
+            except Exception as e:
+                _LOGGER.error(
+                    "❌ Error querying daily breakdown for %s: %s",
+                    valve_topic, e, exc_info=True,
+                )
+                return []
 
     async def cleanup_old_sessions(self, days: int = 90):
         """Clean up sessions older than specified days"""

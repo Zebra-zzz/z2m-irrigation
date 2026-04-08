@@ -1,5 +1,45 @@
 {
   "title": "Z2M Irrigation (Sonoff Valves)",
-  "config": { "step": { "user": { "title": "Set up Z2M Irrigation" } } },
-  "options": { "step": { "init": { "title": "Options" } } }
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Z2M Irrigation",
+        "description": "Click submit to add the integration. All configuration happens via the Configure button after setup."
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "MQTT — step {step}",
+        "description": "Z2M base topic, manual valve names, and flow scaling.",
+        "data": {
+          "base_topic": "Zigbee2MQTT base topic",
+          "manual_topics": "Manual valve friendly names (one per line)",
+          "flow_scale": "Flow scale (multiplier to convert reported flow to L/min)"
+        }
+      },
+      "weather": {
+        "title": "Weather sources — step {step}",
+        "description": "Optional weather sensors used by the irrigation calculator. All four are optional — missing values are treated as neutral defaults (no rain, average VPD).",
+        "data": {
+          "weather_vpd_entity": "VPD sensor (kPa)",
+          "weather_rain_today_entity": "Rain today sensor (mm)",
+          "weather_rain_forecast_24h_entity": "Rain forecast next 24h sensor (mm)",
+          "weather_temp_entity": "Temperature sensor (°C, display only)"
+        }
+      },
+      "safety": {
+        "title": "Safety & global thresholds — step {step}",
+        "description": "Configure the panic-state kill switch and global skip thresholds. The kill switch is invoked best-effort if the integration enters a panic state.",
+        "data": {
+          "kill_switch_entity": "Kill switch entity (turned OFF on panic)",
+          "kill_switch_mode": "Kill switch mode",
+          "global_skip_rain_threshold_mm": "Skip threshold — rain today (mm)",
+          "global_skip_forecast_threshold_mm": "Skip threshold — rain forecast 24h (mm)",
+          "global_min_run_liters": "Global minimum run (L) — zones below this are skipped"
+        }
+      }
+    }
+  }
 }

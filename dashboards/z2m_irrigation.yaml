@@ -1,0 +1,810 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Z2M Irrigation — v4.0 dashboard
+#
+# Pre-built Lovelace dashboard for the z2m_irrigation custom integration.
+# Wires every entity exposed by alpha-1 through alpha-4 into a single
+# editorial-Apple-clean, four-tab UI:
+#
+#   1. Today    — Hero status, calculator card, per-zone live tiles
+#   2. Schedule — List of stored schedules + per-row controls + run-now
+#   3. Setup    — Per-zone config editors + global thresholds + master pause
+#   4. Insight  — 30-day delivery chart, per-zone breakdown, timeline
+#
+# Dependencies (HACS frontend cards — install before importing):
+#   * button-card           (templated buttons + state-aware styling)
+#   * mushroom              (template, entity, chips, slider cards)
+#   * auto-entities         (per-zone repetition)
+#   * apexcharts-card       (Insight tab charts)
+#   * mini-graph-card       (inline sparklines)
+#   * stack-in-card         (visual grouping)
+#   * card-mod              (CSS injection)
+#   * layout-card           (multi-column layouts)
+#
+# Install: see dashboards/README.md in this repo for the import steps.
+# ─────────────────────────────────────────────────────────────────────────────
+
+title: Z2M Irrigation
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared button-card templates
+# ─────────────────────────────────────────────────────────────────────────────
+
+button_card_templates:
+  # Base — typography, spacing, and the ink palette every other template
+  # extends from. Centralizes the look so a single edit re-themes the
+  # whole dashboard.
+  z2m_base:
+    color_type: card
+    show_icon: false
+    show_name: false
+    show_label: false
+    show_state: false
+    styles:
+      card:
+        - background: var(--card-background-color)
+        - border-radius: 18px
+        - padding: 22px
+        - box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 1px 1px rgba(0,0,0,0.02)
+        - border: 1px solid rgba(127,127,127,0.10)
+        - color: var(--primary-text-color)
+        - font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif
+        - -webkit-font-smoothing: antialiased
+        - text-rendering: optimizeLegibility
+        - transition: all 200ms ease
+
+  # Hero card — large status surface with 5 visual states. The state is
+  # resolved by reading the binary_sensor.z2m_irrigation_panic and
+  # any_running entities plus the next_run_summary sensor.
+  z2m_hero:
+    template: z2m_base
+    triggers_update:
+      - binary_sensor.z2m_irrigation_panic
+      - binary_sensor.z2m_irrigation_any_running
+      - sensor.z2m_irrigation_next_run_summary
+      - sensor.z2m_irrigation_active_session_summary
+      - switch.z2m_irrigation_master_enable
+    styles:
+      card:
+        - padding: 30px
+        - min-height: 220px
+      custom_fields:
+        accent:
+          - position: absolute
+          - top: 22px
+          - left: 30px
+          - font-size: 11px
+          - font-weight: 600
+          - letter-spacing: 0.12em
+          - text-transform: uppercase
+          - opacity: 0.55
+        title:
+          - position: absolute
+          - top: 50px
+          - left: 30px
+          - right: 30px
+          - font-size: 32px
+          - font-weight: 600
+          - line-height: 1.15
+          - letter-spacing: -0.01em
+        sub:
+          - position: absolute
+          - bottom: 28px
+          - left: 30px
+          - right: 30px
+          - font-size: 14px
+          - opacity: 0.7
+          - line-height: 1.4
+        bar:
+          - position: absolute
+          - left: 0
+          - top: 0
+          - width: 4px
+          - height: 100%
+          - background: var(--accent)
+          - border-radius: 18px 0 0 18px
+    custom_fields:
+      accent: >-
+        [[[
+          if (states['binary_sensor.z2m_irrigation_panic'].state === 'on') return 'panic';
+          if (states['binary_sensor.z2m_irrigation_any_running'].state === 'on') return 'running';
+          if (states['switch.z2m_irrigation_master_enable'].state === 'off') return 'paused';
+          if (states['sensor.z2m_irrigation_next_run_summary'].state === 'no_schedule') return 'idle';
+          return 'scheduled';
+        ]]]
+      title: >-
+        [[[
+          if (states['binary_sensor.z2m_irrigation_panic'].state === 'on')
+            return '🚨 Kill the water pump';
+          if (states['binary_sensor.z2m_irrigation_any_running'].state === 'on') {
+            const a = states['sensor.z2m_irrigation_active_session_summary'];
+            return 'Running ' + (a.state || 'a zone');
+          }
+          if (states['switch.z2m_irrigation_master_enable'].state === 'off')
+            return 'Paused';
+          const next = states['sensor.z2m_irrigation_next_run_summary'];
+          if (next.state === 'no_schedule') return 'No schedule yet';
+          const d = new Date(next.state);
+          if (isNaN(d.getTime())) return 'Idle';
+          const opts = { weekday: 'long', hour: '2-digit', minute: '2-digit' };
+          return 'Next run ' + d.toLocaleString(undefined, opts);
+        ]]]
+      sub: >-
+        [[[
+          if (states['binary_sensor.z2m_irrigation_panic'].state === 'on') {
+            const attrs = states['binary_sensor.z2m_irrigation_panic'].attributes;
+            return 'Reason: ' + (attrs.reason || 'unknown') +
+                   ' · clear via z2m_irrigation.clear_panic once water is confirmed off.';
+          }
+          if (states['binary_sensor.z2m_irrigation_any_running'].state === 'on') {
+            const a = states['sensor.z2m_irrigation_active_session_summary'].attributes;
+            const liters = (a.session_liters || 0).toFixed(1);
+            const target = a.target_liters ? '/ ' + a.target_liters.toFixed(0) + ' L' : '';
+            const flow = (a.flow_lpm || 0).toFixed(2);
+            return liters + ' L ' + target + ' · ' + flow + ' L/min';
+          }
+          if (states['switch.z2m_irrigation_master_enable'].state === 'off')
+            return 'Scheduler paused. Toggle Master Enable to resume.';
+          const next = states['sensor.z2m_irrigation_next_run_summary'].attributes;
+          if (!next.schedule_name) return 'Create a schedule on the Schedule tab to get started.';
+          const liters = next.estimated_total_liters
+            ? next.estimated_total_liters.toFixed(1) + ' L estimated'
+            : '';
+          return next.schedule_name + ' · ' + (next.zones || []).length + ' zones' +
+                 (liters ? ' · ' + liters : '');
+        ]]]
+      bar: ""
+    style: |
+      ha-card {
+        --accent: var(--primary-color);
+      }
+      ha-card[data-accent="panic"] {
+        --accent: #c0392b;
+        background: linear-gradient(0deg, rgba(192,57,43,0.06), rgba(192,57,43,0.02));
+      }
+      ha-card[data-accent="running"] { --accent: #0d7377; }
+      ha-card[data-accent="paused"]  { --accent: #888; }
+      ha-card[data-accent="idle"]    { --accent: #888; }
+      ha-card[data-accent="scheduled"] { --accent: #0d7377; }
+    extra_styles: |
+      [[[
+        return `ha-card[data-accent='${this.shadowRoot.querySelector('#accent')?.innerText || ''}']`;
+      ]]]
+
+  # Per-zone tile — used by auto-entities on the Today tab to render one
+  # card per discovered valve. Reads the per-zone session sensors that
+  # alpha-1 + alpha-3 + alpha-4 expose.
+  z2m_zone_tile:
+    template: z2m_base
+    tap_action:
+      action: more-info
+    styles:
+      card:
+        - padding: 18px
+        - min-height: 140px
+      grid:
+        - grid-template-areas: '"name status" "metric metric" "sub sub"'
+        - grid-template-columns: 1fr auto
+        - row-gap: 6px
+      custom_fields:
+        name:
+          - grid-area: name
+          - font-size: 16px
+          - font-weight: 600
+        status:
+          - grid-area: status
+          - font-size: 11px
+          - font-weight: 600
+          - text-transform: uppercase
+          - letter-spacing: 0.08em
+          - color: var(--accent)
+        metric:
+          - grid-area: metric
+          - font-size: 28px
+          - font-weight: 600
+          - margin-top: 8px
+          - line-height: 1.1
+        sub:
+          - grid-area: sub
+          - font-size: 12px
+          - opacity: 0.6
+          - margin-top: 4px
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Views
+# ─────────────────────────────────────────────────────────────────────────────
+
+views:
+
+  # ───────────────────────────────────────────────────────────────────────
+  # Tab 1 — Today
+  # ───────────────────────────────────────────────────────────────────────
+  - title: Today
+    path: today
+    icon: mdi:calendar-today
+    type: sections
+    max_columns: 2
+    sections:
+
+      # Section 1: Hero status card
+      - type: grid
+        cards:
+          - type: custom:button-card
+            template: z2m_hero
+
+          # Quick chips: skip-today, run smart now, master enable
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: Run smart cycle now
+                secondary: All zones in cycle
+                icon: mdi:play-circle
+                icon_color: teal
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.run_smart_now
+                  data: {}
+                  confirmation:
+                    text: Start a smart cycle right now across all zones marked in_smart_cycle?
+
+              - type: custom:mushroom-template-card
+                primary: Skip today
+                secondary: >-
+                  {% if state_attr('sensor.z2m_irrigation_next_run_summary', 'skip_today') %}
+                    Currently skipping
+                  {% else %}
+                    Stop today's runs
+                  {% endif %}
+                icon: mdi:debug-step-over
+                icon_color: >-
+                  {% if state_attr('sensor.z2m_irrigation_next_run_summary', 'skip_today') %}
+                    orange
+                  {% else %}
+                    grey
+                  {% endif %}
+                tap_action:
+                  action: call-service
+                  service: >-
+                    {% if state_attr('sensor.z2m_irrigation_next_run_summary', 'skip_today') %}
+                      z2m_irrigation.clear_skip_today
+                    {% else %}
+                      z2m_irrigation.skip_today
+                    {% endif %}
+
+              - type: custom:mushroom-entity-card
+                entity: switch.z2m_irrigation_master_enable
+                name: Master enable
+                icon: mdi:power
+                icon_color: >-
+                  {% if is_state('switch.z2m_irrigation_master_enable', 'on') %}
+                    teal
+                  {% else %}
+                    grey
+                  {% endif %}
+
+      # Section 2: Calculator card — editorial prose-style breakdown
+      - type: grid
+        cards:
+          - type: markdown
+            content: |
+              ## Today's calculation
+              {% set tc = states('sensor.z2m_irrigation_today_calculation') %}
+              {% set attrs = state_attr('sensor.z2m_irrigation_today_calculation', 'zones') or [] %}
+              {% if tc in ['unknown', 'unavailable', None] %}
+                _Calculator hasn't run yet — waiting for the first valve to come online or for `z2m_irrigation.recalculate_now` to be called._
+              {% else %}
+              **{{ tc }} L** total across **{{ state_attr('sensor.z2m_irrigation_today_calculation', 'runnable_zones') }}**
+              of **{{ state_attr('sensor.z2m_irrigation_today_calculation', 'total_zones') }}** zones.
+
+              VPD **{{ state_attr('sensor.z2m_irrigation_today_calculation', 'vpd_kpa_effective') | round(2) }} kPa**
+              · rain today **{{ state_attr('sensor.z2m_irrigation_today_calculation', 'rain_today_mm_effective') | round(1) }} mm**
+              · forecast 24h **{{ state_attr('sensor.z2m_irrigation_today_calculation', 'rain_forecast_24h_mm_effective') | round(1) }} mm**
+              · dryness factor **{{ state_attr('sensor.z2m_irrigation_today_calculation', 'dryness') | round(2) }}**
+
+              ---
+
+              {% for z in attrs -%}
+              {% if z.skipped -%}
+              ~~**{{ z.zone }}** — skipped ({{ z.skip_reason }})~~
+              {% else -%}
+              **{{ z.zone }}** — {{ z.liters }} L ({{ z.need_mm }} mm × {{ z.l_per_mm }} L/mm × {{ z.factor }})
+              {% endif -%}
+              {% endfor %}
+              {% endif %}
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: Recalculate now
+                secondary: Force fresh weather read
+                icon: mdi:refresh
+                icon_color: teal
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.recalculate_now
+
+      # Section 3: Per-zone live tiles (one per discovered valve)
+      - type: grid
+        cards:
+          - type: heading
+            heading: Zones
+            heading_style: title
+          - type: custom:auto-entities
+            card:
+              type: grid
+              columns: 2
+              square: false
+            filter:
+              exclude:
+                - entity_id: switch.z2m_irrigation_master_enable
+              include:
+                - integration: z2m_irrigation
+                  domain: switch
+                  options:
+                    type: custom:button-card
+                    template: z2m_zone_tile
+                    entity: this.entity_id
+                    custom_fields:
+                      name: |
+                        [[[
+                          return entity.attributes.friendly_name || entity.entity_id;
+                        ]]]
+                      status: |
+                        [[[
+                          if (entity.state === 'on') return 'open';
+                          return 'closed';
+                        ]]]
+                      metric: |
+                        [[[
+                          // Try to read this zone's last_run_liters via the parallel sensor.
+                          const base = entity.entity_id.replace('switch.', '');
+                          const liters = states['sensor.' + base + '_last_run_liters'];
+                          if (liters && liters.state && liters.state !== 'unknown')
+                            return liters.state + ' L';
+                          return '— L';
+                        ]]]
+                      sub: |
+                        [[[
+                          const base = entity.entity_id.replace('switch.', '');
+                          const at = states['sensor.' + base + '_last_run_at'];
+                          if (!at || at.state === 'unknown') return 'No history yet';
+                          const d = new Date(at.state);
+                          if (isNaN(d.getTime())) return at.state;
+                          const opts = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+                          return 'Last run ' + d.toLocaleString(undefined, opts);
+                        ]]]
+            sort:
+              method: friendly_name
+
+      # Section 4: Manual run sliders
+      - type: grid
+        cards:
+          - type: heading
+            heading: Manual run
+            heading_style: title
+          - type: markdown
+            content: |
+              Set a target volume on the slider beside any zone, and the
+              integration will publish a `cyclic_quantitative_irrigation`
+              command. The hardware closes itself at the target;
+              software guardrails kick in if anything goes wrong.
+          - type: custom:auto-entities
+            card:
+              type: grid
+              columns: 1
+              square: false
+            filter:
+              include:
+                - integration: z2m_irrigation
+                  domain: number
+                  entity_id: "number.*_run_for_liters"
+                  options:
+                    type: custom:mushroom-number-card
+                    display_mode: slider
+            sort:
+              method: friendly_name
+
+  # ───────────────────────────────────────────────────────────────────────
+  # Tab 2 — Schedule
+  # ───────────────────────────────────────────────────────────────────────
+  - title: Schedule
+    path: schedule
+    icon: mdi:calendar-clock
+    type: sections
+    max_columns: 2
+    sections:
+
+      # Section: Next run summary
+      - type: grid
+        cards:
+          - type: markdown
+            content: |
+              ## Next scheduled run
+              {% set s = states('sensor.z2m_irrigation_next_run_summary') %}
+              {% if s == 'no_schedule' %}
+              _No schedules yet. Use the **Create schedule** button below to add one._
+              {% else %}
+              {% set d = as_datetime(s) %}
+              **{{ d.strftime('%A %d %b at %H:%M') if d else s }}** —
+              **{{ state_attr('sensor.z2m_irrigation_next_run_summary', 'schedule_name') }}**
+              ({{ state_attr('sensor.z2m_irrigation_next_run_summary', 'mode') }} mode,
+              {{ state_attr('sensor.z2m_irrigation_next_run_summary', 'zones') | length }} zones,
+              ~{{ state_attr('sensor.z2m_irrigation_next_run_summary', 'estimated_total_liters') }} L estimated)
+              {% endif %}
+
+              ---
+              {% set q = state_attr('sensor.z2m_irrigation_next_run_summary', 'queue') or [] %}
+              {% if q | length > 0 %}
+              **Queue (in flight):**
+              {% for item in q %}
+              - {{ item.zone }} — {{ item.liters }} L ({{ item.trigger }})
+              {% endfor %}
+              {% else %}
+              _Queue is empty._
+              {% endif %}
+
+      # Section: Schedule list — one row per stored schedule
+      - type: grid
+        cards:
+          - type: heading
+            heading: All schedules
+            heading_style: title
+          - type: markdown
+            content: |
+              **{{ states('sensor.z2m_irrigation_schedules') }}** enabled
+              of **{{ state_attr('sensor.z2m_irrigation_schedules', 'total') }}** total.
+          - type: custom:auto-entities
+            card:
+              type: vertical-stack
+            filter:
+              template: |
+                {% for s in state_attr('sensor.z2m_irrigation_schedules', 'schedules') or [] %}
+                  {{
+                    {
+                      'type': 'custom:mushroom-template-card',
+                      'primary': s.name + (' (disabled)' if not s.enabled else ''),
+                      'secondary': s.time + ' · ' +
+                                   (s.days | join(',') if s.days else 'every day') + ' · ' +
+                                   s.mode + ' · ' +
+                                   (s.zones | length | string) + ' zones' +
+                                   (' · last: ' + (s.last_run_outcome or 'never') if s.last_run_at else ''),
+                      'icon': 'mdi:calendar-clock' if s.enabled else 'mdi:calendar-remove',
+                      'icon_color': 'teal' if s.enabled else 'grey',
+                      'tap_action': {
+                        'action': 'call-service',
+                        'service': 'z2m_irrigation.run_schedule_now',
+                        'data': { 'schedule_id': s.id },
+                        'confirmation': { 'text': 'Force-run schedule "' + s.name + '" now?' }
+                      },
+                      'hold_action': {
+                        'action': 'call-service',
+                        'service': ('z2m_irrigation.disable_schedule' if s.enabled else 'z2m_irrigation.enable_schedule'),
+                        'data': { 'schedule_id': s.id }
+                      }
+                    }
+                  }},
+                {% endfor %}
+
+      # Section: In-dashboard schedule editor (rc-1+)
+      - type: grid
+        cards:
+          - type: heading
+            heading: Create new schedule
+            heading_style: title
+          - type: custom:z2m-irrigation-schedule-editor-card
+          - type: markdown
+            content: |
+              **Tap** any row above to force-run that schedule now (gates still apply).
+              **Hold** any row to toggle it enabled/disabled.
+
+              For more advanced edits (rename, change time, change zones),
+              call `z2m_irrigation.update_schedule` from Developer Tools →
+              Services with the schedule's `id` from the row's attributes.
+              An in-dashboard edit form is on the v4.1 roadmap.
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: Cancel queued runs
+                secondary: Drops all pending zones
+                icon: mdi:cancel
+                icon_color: orange
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.cancel_queue
+                  confirmation:
+                    text: Cancel all queued zones? In-flight session is NOT cancelled.
+
+  # ───────────────────────────────────────────────────────────────────────
+  # Tab 3 — Setup
+  # ───────────────────────────────────────────────────────────────────────
+  - title: Setup
+    path: setup
+    icon: mdi:cog-outline
+    type: sections
+    max_columns: 2
+    sections:
+
+      # Section: Master controls
+      - type: grid
+        cards:
+          - type: heading
+            heading: Master controls
+            heading_style: title
+          - type: entities
+            entities:
+              - entity: switch.z2m_irrigation_master_enable
+                name: Master enable (pause all schedules)
+              - entity: binary_sensor.z2m_irrigation_panic
+                name: Panic state
+              - entity: binary_sensor.z2m_irrigation_any_running
+                name: Currently running
+              - type: section
+                label: Diagnostic counts
+              - entity: sensor.z2m_irrigation_today_calculation
+                name: Today's calculated total
+              - entity: sensor.z2m_irrigation_week_summary
+                name: Week summary
+              - entity: sensor.z2m_irrigation_schedules
+                name: Enabled schedules
+              - entity: sensor.z2m_irrigation_schedule_history
+                name: Recorded schedule events
+              - entity: sensor.z2m_irrigation_daily_totals
+                name: 30-day total
+
+      # Section: Per-zone config — auto-generated rows
+      - type: grid
+        cards:
+          - type: heading
+            heading: Per-zone config
+            heading_style: title
+          - type: markdown
+            content: |
+              Each zone's calculator inputs live in the integration's
+              JSON store and persist across HA restarts. Edit via:
+
+              - **z2m_irrigation.set_zone_factor** — multiplier (default 1.0)
+              - **z2m_irrigation.set_zone_l_per_mm** — calibration (default 12.0)
+              - **z2m_irrigation.set_zone_base_mm** — base mm/day (default 4.0)
+              - **z2m_irrigation.set_zone_in_smart_cycle** — include in smart runs
+              - **z2m_irrigation.set_zone_skip_thresholds** — per-zone overrides
+              - **z2m_irrigation.reset_zone_to_defaults** — wipe back to defaults
+          - type: custom:auto-entities
+            card:
+              type: vertical-stack
+            filter:
+              include:
+                - integration: z2m_irrigation
+                  domain: binary_sensor
+                  entity_id: "binary_sensor.*_in_smart_cycle"
+                  options:
+                    type: entities
+                    title: this.attributes.friendly_name
+                    state_color: true
+            sort:
+              method: friendly_name
+          - type: markdown
+            content: |
+              **Tip:** the per-zone sensors (`zone_factor`, `zone_l_per_mm`,
+              `zone_base_mm`, `last_run_liters`, `avg_flow_7d`) appear under
+              each valve's device card in Settings → Devices & Services.
+
+      # Section: Integration config (read-only summary)
+      - type: grid
+        cards:
+          - type: heading
+            heading: Integration options
+            heading_style: title
+          - type: markdown
+            content: |
+              All weather sources, kill switch, and global skip thresholds
+              are configured in the integration's options flow:
+
+              **Settings → Devices & Services → Z2M Irrigation → Configure**
+
+              The 3 steps cover MQTT, weather sources, and safety. Edits
+              are picked up live without an HA restart.
+
+              ---
+
+              Current global thresholds and weather wiring are visible on
+              the manager's logs at startup. To re-read, restart the
+              integration via:
+              - **z2m_irrigation.rescan** — re-subscribes MQTT and reloads.
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: Recalculate
+                secondary: Refresh today_calculation
+                icon: mdi:refresh
+                icon_color: teal
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.recalculate_now
+              - type: custom:mushroom-template-card
+                primary: Rescan MQTT
+                secondary: Re-discover valves
+                icon: mdi:radar
+                icon_color: teal
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.rescan
+              - type: custom:mushroom-template-card
+                primary: Clear panic
+                secondary: After verifying water off
+                icon: mdi:bell-cancel
+                icon_color: red
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.clear_panic
+                  confirmation:
+                    text: Clear panic state? Verify water flow is stopped FIRST.
+
+  # ───────────────────────────────────────────────────────────────────────
+  # Tab 4 — Insight
+  # ───────────────────────────────────────────────────────────────────────
+  - title: Insight
+    path: insight
+    icon: mdi:chart-box-outline
+    type: sections
+    max_columns: 2
+    sections:
+
+      # Section: 30-day delivery — combined stacked bar chart
+      - type: grid
+        cards:
+          - type: heading
+            heading: 30-day delivery
+            heading_style: title
+          - type: custom:apexcharts-card
+            graph_span: 30d
+            span:
+              end: day
+            header:
+              show: true
+              title: Combined daily totals
+              show_states: true
+              colorize_states: true
+            apex_config:
+              chart:
+                type: bar
+                height: 280
+              plotOptions:
+                bar:
+                  borderRadius: 4
+                  columnWidth: 70%
+              dataLabels:
+                enabled: false
+              legend:
+                show: false
+              xaxis:
+                type: datetime
+            series:
+              - entity: sensor.z2m_irrigation_daily_totals
+                name: All zones
+                color: "#0d7377"
+                data_generator: |
+                  const days = entity.attributes.days || [];
+                  return days.slice().reverse().map(d => [
+                    new Date(d.date + 'T00:00:00').getTime(),
+                    d.liters
+                  ]);
+
+      # Section: Per-zone leaderboard from daily_totals.zones attribute
+      - type: grid
+        cards:
+          - type: heading
+            heading: Per-zone — last 30 days
+            heading_style: title
+          - type: markdown
+            content: |
+              {% set zones = state_attr('sensor.z2m_irrigation_daily_totals', 'zones') or [] %}
+              {% if zones | length == 0 %}
+              _Aggregation cache is empty — waiting for the first refresh._
+              {% else %}
+              {% set sorted_z = zones | sort(attribute='total_liters', reverse=True) %}
+              | Zone | Liters | Minutes | Sessions |
+              | --- | ---: | ---: | ---: |
+              {% for z in sorted_z -%}
+              | **{{ z.name }}** | {{ z.total_liters }} | {{ z.total_minutes }} | {{ z.total_sessions }} |
+              {% endfor %}
+              {% endif %}
+
+      # Section: Per-zone daily charts (one per discovered valve)
+      - type: grid
+        cards:
+          - type: heading
+            heading: Per-zone trend
+            heading_style: title
+          - type: custom:auto-entities
+            card:
+              type: vertical-stack
+            filter:
+              include:
+                - integration: z2m_irrigation
+                  domain: sensor
+                  entity_id: "sensor.*_daily_history"
+                  options:
+                    type: custom:apexcharts-card
+                    graph_span: 30d
+                    span:
+                      end: day
+                    header:
+                      show: true
+                      title: this.attributes.friendly_name
+                    apex_config:
+                      chart:
+                        type: bar
+                        height: 180
+                      plotOptions:
+                        bar:
+                          borderRadius: 3
+                          columnWidth: 60%
+                      dataLabels:
+                        enabled: false
+                      legend:
+                        show: false
+                      xaxis:
+                        type: datetime
+                    series:
+                      - entity: this.entity_id
+                        color: "#4a90e2"
+                        data_generator: |
+                          const days = entity.attributes.days || [];
+                          return days.slice().reverse().map(d => [
+                            new Date(d.date + 'T00:00:00').getTime(),
+                            d.liters
+                          ]);
+            sort:
+              method: friendly_name
+
+      # Section: Schedule timeline — last 14 days of fires/skips
+      - type: grid
+        cards:
+          - type: heading
+            heading: Schedule timeline
+            heading_style: title
+          - type: markdown
+            content: |
+              {% set events = state_attr('sensor.z2m_irrigation_schedule_history', 'events') or [] %}
+              {% if events | length == 0 %}
+              _No schedule events recorded yet. Events appear here as
+              schedules fire or skip._
+              {% else %}
+              **{{ events | length }}** recent events shown
+              ({{ states('sensor.z2m_irrigation_schedule_history') }} total in window).
+
+              {% for e in events[:30] -%}
+              {% set dt = as_datetime(e.at) %}
+              {% if e.kind == 'fired' -%}
+              ✅ **{{ dt.strftime('%a %d %b %H:%M') if dt else e.at }}** — fired
+              **{{ e.schedule_name }}**
+              ({{ (e.zones or []) | length }} zones, {{ e.total_liters or '?' }} L,
+              {{ e.trigger or 'scheduled' }})
+              {% else -%}
+              ⏭ **{{ dt.strftime('%a %d %b %H:%M') if dt else e.at }}** — skipped
+              **{{ e.schedule_name }}** ({{ e.outcome }})
+              {% endif -%}
+              {% endfor %}
+              {% endif %}
+
+      # Section: Per-zone avg flow (a smaller diagnostic strip)
+      - type: grid
+        cards:
+          - type: heading
+            heading: Avg flow per zone
+            heading_style: title
+          - type: markdown
+            content: |
+              Rolling average flow rate over the most recent completed
+              sessions. A drifting value over time signals filter clog,
+              valve wear, or pressure changes.
+          - type: custom:auto-entities
+            card:
+              type: glance
+              show_state: true
+              show_name: true
+            filter:
+              include:
+                - integration: z2m_irrigation
+                  domain: sensor
+                  entity_id: "sensor.*_avg_flow_7d"
+            sort:
+              method: friendly_name

@@ -43,6 +43,18 @@ from .const import (
     INITIAL_VALVE_AUTO_CLOSE_WHEN_WATER_SHORTAGE,
 )
 from .database import IrrigationDatabase
+from .zone_store import ZoneStore
+from .calculator import CalculatorResult, compute as compute_calculator
+from .weather import read_inputs as read_weather_inputs
+from .schedule_engine import ScheduleEngine
+from .aggregator import DailySummary, build_daily_summary
+from .const import (
+    SIG_GLOBAL_UPDATE,
+    DEFAULT_GLOBAL_SKIP_RAIN_MM,
+    DEFAULT_GLOBAL_SKIP_FORECAST_MM,
+    DEFAULT_GLOBAL_MIN_RUN_LITERS,
+    DEFAULT_KILL_SWITCH_MODE,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,6 +87,16 @@ class Valve:
     trigger_type: str = "manual"  # Track how valve was triggered
     last_session_start: Optional[str] = None  # ISO datetime of last session start
     last_session_end: Optional[str] = None  # ISO datetime of last session end
+
+    # v4.0-alpha-3 — rolling avg flow over the last N completed sessions
+    # for this valve. Refreshed by the existing 15-min periodic loop and
+    # after every session ends. Used by the per-zone avg-flow sensor and
+    # the ETA computation in ActiveSessionSummary.
+    avg_flow_lpm_7d: Optional[float] = None
+    # Volume delivered in the most recent completed session (L). Set by
+    # the session-end path in `_on_state` so the new per-zone
+    # `last_run_liters` sensor can read it without hitting the database.
+    last_session_liters: Optional[float] = None
 
     # ───────────────────────────────────────────────────────────────────
     # v3.1 — Safety guardrail tracking (none persisted; recomputed at runtime)
@@ -156,6 +178,11 @@ class ValveManager:
         base_topic: str = DEFAULT_BASE_TOPIC,
         manual_topics: Iterable[str] = (),
         flow_scale: float = 1.0,
+        # v4.0-alpha-1 — new wiring (all optional so existing call sites
+        # remain valid; the new __init__.py passes everything explicitly).
+        zone_store: Optional["ZoneStore"] = None,
+        kill_switch_entity: Optional[str] = None,
+        kill_switch_mode: str = "off_and_notify",
     ) -> None:
         self.hass = hass
         self.base = base_topic or DEFAULT_BASE_TOPIC
@@ -169,6 +196,55 @@ class ValveManager:
         # valves. Set by the various trip conditions, cleared by the
         # `z2m_irrigation.clear_panic` service or by external automation.
         self.panic: PanicState = PanicState()
+
+        # v4.0-alpha-1 — per-zone config store and integration-wide safety
+        # settings. The kill switch is invoked best-effort whenever the
+        # panic state goes active (see `_call_kill_switch`).
+        self.zone_store: Optional[ZoneStore] = zone_store
+        self.kill_switch_entity: Optional[str] = kill_switch_entity
+        self.kill_switch_mode: str = kill_switch_mode
+
+        # v4.0-alpha-1 — global "master enable" pause flag. Backed by the
+        # `switch.z2m_irrigation_master_enable` entity. When False, the
+        # alpha-2 scheduler will not start any new schedule runs (running
+        # sessions are NOT cancelled — pause is for the *next* run only).
+        self.master_enable: bool = True
+
+        # v4.0-alpha-1 — weather entity ids and global skip thresholds.
+        # All optional. Set by __init__.py from the config flow options
+        # and refreshed live on options updates. The calculator handles
+        # missing inputs gracefully via neutral defaults.
+        self.weather_vpd_entity: Optional[str] = None
+        self.weather_rain_today_entity: Optional[str] = None
+        self.weather_rain_forecast_24h_entity: Optional[str] = None
+        self.weather_temp_entity: Optional[str] = None
+        self.global_skip_rain_threshold_mm: float = DEFAULT_GLOBAL_SKIP_RAIN_MM
+        self.global_skip_forecast_threshold_mm: float = DEFAULT_GLOBAL_SKIP_FORECAST_MM
+        self.global_min_run_liters: float = DEFAULT_GLOBAL_MIN_RUN_LITERS
+
+        # v4.0-alpha-1 — cached calculator result. Refreshed by
+        # `recalculate_today()` on a 15-min interval and on demand. The
+        # `today_calculation` global sensor reads from this cache.
+        self.today_calculation: Optional[CalculatorResult] = None
+        self._today_recalc_unsub: Optional[Callable[[], None]] = None
+
+        # v4.0-alpha-2 — schedule engine. Owned by the manager so it
+        # shares the lifecycle (start/stop) and can call back into
+        # `start_liters` for queued zone runs. Lazily instantiated when
+        # the zone_store is available — for v3.x-style call sites with
+        # no store, the engine simply isn't created and schedule services
+        # become no-ops.
+        self.schedule_engine: Optional[ScheduleEngine] = None
+        if self.zone_store is not None:
+            self.schedule_engine = ScheduleEngine(hass, self, self.zone_store)
+
+        # v4.0-alpha-4 — daily aggregation cache. Refreshed by the
+        # existing 15-min `_periodic_refresh_time_metrics` loop and on
+        # every session end. The dashboard's Insight tab reads this via
+        # the `daily_totals` global sensor and per-zone `daily_history`
+        # sensors. Hydrated from the persisted ZoneStore snapshot on
+        # startup so charts have data immediately on cold restart.
+        self.daily_summary: Optional[DailySummary] = None
 
     def _schedule_task(self, coro):
         """Schedule an async task from a callback (thread-safe)."""
@@ -225,6 +301,43 @@ class ValveManager:
             GUARDRAIL_CHECK_INTERVAL_SECONDS,
         )
 
+        # v4.0-alpha-1 — periodic calculator refresh. Runs every 15 min so
+        # the today_calculation sensor stays fresh as weather changes
+        # throughout the day. Initial run is deferred until valves have
+        # been discovered (we trigger it from `_ensure_valve` once the
+        # first valve appears, and again from any zone-config change).
+        self._today_recalc_unsub = async_track_time_interval(
+            self.hass,
+            self._periodic_recalculate_today,
+            timedelta(minutes=15),
+        )
+        self._unsubs.append(self._today_recalc_unsub)
+        _LOGGER.info("📊 Calculator refresh loop started (every 15 min)")
+
+        # v4.0-alpha-2 — start the schedule engine. The engine subscribes
+        # to its own per-minute tick and runs an initial catch-up after a
+        # short delay (so valves are discovered first).
+        if self.schedule_engine is not None:
+            self.schedule_engine.start()
+
+        # v4.0-alpha-4 — hydrate the daily aggregation cache from the
+        # persisted ZoneStore snapshot so the dashboard has data
+        # immediately on cold restart. The first real refresh is
+        # triggered by the periodic loop (or by `_ensure_valve` once
+        # the first valve is discovered, whichever fires first).
+        if self.zone_store is not None:
+            try:
+                snap = self.zone_store.get_daily_summary()
+                if snap is not None:
+                    self.daily_summary = DailySummary.from_dict(snap)
+                    _LOGGER.info(
+                        "📊 Daily summary hydrated from store: %d zones, built %s",
+                        len(self.daily_summary.zones),
+                        self.daily_summary.built_at,
+                    )
+            except Exception as e:
+                _LOGGER.warning("Failed to hydrate daily summary: %s", e)
+
         # Ask Z2M to send the device list (ignore if MQTT not ready)
         try:
             await mqtt.async_publish(self.hass, f"{self.base}/bridge/config/devices/get", "")
@@ -234,6 +347,8 @@ class ValveManager:
 
     async def async_stop(self) -> None:
         _LOGGER.debug("Stopping ValveManager")
+        if self.schedule_engine is not None:
+            self.schedule_engine.stop()
         while self._unsubs:
             self._unsubs.pop()()
 
@@ -255,8 +370,16 @@ class ValveManager:
                 v.last_session_start = await self.db.get_last_session_start(topic)
                 v.last_session_end = await self.db.get_last_session_end(topic)
 
-                _LOGGER.debug("✅ Refreshed %s: 24h=%.2fL, 7d=%.2fL, last session: %s",
-                             v.name, v.last_24h_liters, v.last_7d_liters, v.last_session_start)
+                # v4.0-alpha-3 — rolling avg flow over recent sessions.
+                # Returns None if there's no history yet, which the
+                # per-zone sensor renders as `unknown`.
+                v.avg_flow_lpm_7d = await self.db.get_recent_avg_flow(
+                    topic, lookback=HISTORICAL_FLOW_LOOKBACK_SESSIONS,
+                )
+
+                _LOGGER.debug("✅ Refreshed %s: 24h=%.2fL, 7d=%.2fL, last session: %s, avg_flow: %s",
+                             v.name, v.last_24h_liters, v.last_7d_liters,
+                             v.last_session_start, v.avg_flow_lpm_7d)
 
                 # Notify sensors to update
                 self._dispatch_signal(sig_update(topic))
@@ -286,6 +409,195 @@ class ValveManager:
         self.hass.loop.call_soon_threadsafe(
             self.hass.bus.async_fire, event_type, event_data
         )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # v4.0-alpha-1 — kill switch
+    #
+    # When the panic system trips, the integration calls the user-configured
+    # kill switch entity (typically a `switch.water_pump`) so the entire
+    # upstream water supply is cut. This is the integration's last line of
+    # defense; the existing `EVENT_PANIC_REQUIRED` HA bus event still
+    # fires, so external automations layered on top continue to work.
+    #
+    # The call is intentionally best-effort:
+    #   - If no kill switch is configured, do nothing (legacy behavior).
+    #   - If the entity doesn't exist or the call raises, log a warning but
+    #     don't crash the panic flow.
+    #   - The "off_and_notify" mode also fires a critical persistent
+    #     notification so the user sees what happened on the dashboard.
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _call_kill_switch(self, panic_reason: str) -> None:
+        """Best-effort: turn off the user-configured kill switch entity.
+
+        Safe to call from any thread — marshals onto the event loop via
+        `call_soon_threadsafe`. No-op if disabled or unconfigured.
+        """
+        if not self.kill_switch_entity:
+            return
+        if self.kill_switch_mode == "disabled":
+            return
+
+        entity = self.kill_switch_entity
+        mode = self.kill_switch_mode
+        _LOGGER.critical(
+            "🛑 KILL SWITCH: invoking %s (mode=%s, panic_reason=%s)",
+            entity, mode, panic_reason,
+        )
+
+        async def _do_call():
+            try:
+                await self.hass.services.async_call(
+                    "homeassistant",
+                    "turn_off",
+                    {"entity_id": entity},
+                    blocking=False,
+                )
+            except Exception as e:
+                _LOGGER.error(
+                    "Kill switch %s: turn_off call failed: %s", entity, e,
+                )
+
+            if mode == "off_and_notify":
+                try:
+                    await self.hass.services.async_call(
+                        "persistent_notification",
+                        "create",
+                        {
+                            "title": "🛑 z2m_irrigation kill switch fired",
+                            "message": (
+                                f"Panic state tripped ({panic_reason}). "
+                                f"Kill switch `{entity}` was turned OFF. "
+                                f"Manual investigation required — clear via "
+                                f"the `z2m_irrigation.clear_panic` service "
+                                f"once water flow has been confirmed stopped."
+                            ),
+                            "notification_id": "z2m_irrigation_kill_switch",
+                        },
+                        blocking=False,
+                    )
+                except Exception as e:
+                    _LOGGER.error(
+                        "Kill switch %s: notify failed: %s", entity, e,
+                    )
+
+        self.hass.loop.call_soon_threadsafe(
+            lambda: self.hass.async_create_task(_do_call())
+        )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # v4.0-alpha-1 — global update notification + calculator cache
+    #
+    # The global sensors (today_calculation, next_run_summary,
+    # active_session_summary, week_summary) subscribe to SIG_GLOBAL_UPDATE
+    # and re-render their state whenever it fires. We fire it from:
+    #   - `recalculate_today()` after the calc cache refreshes
+    #   - `set_master_enable()` when the user toggles the pause switch
+    #   - `__init__.py` after a zone-config service mutates the store
+    # Per-valve updates continue to use sig_update(topic) — global sensors
+    # that need per-valve detail subscribe to those individually.
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _notify_global(self) -> None:
+        """Fire the global update signal. Safe from any thread."""
+        self._dispatch_signal(SIG_GLOBAL_UPDATE)
+
+    def set_master_enable(self, enabled: bool) -> None:
+        """Toggle the global master-enable pause flag.
+
+        When False, the alpha-2 scheduler will skip new schedule runs.
+        Running sessions are NOT cancelled. Manual `start_liters` /
+        `start_timed` calls are NOT blocked — pause only affects scheduled
+        runs (which don't exist yet in alpha-1; this is the back-end the
+        alpha-2 scheduler will consult).
+        """
+        if self.master_enable == enabled:
+            return
+        self.master_enable = enabled
+        _LOGGER.info(
+            "⏸️  Master enable %s (scheduled runs will %s)",
+            "ON" if enabled else "OFF",
+            "fire" if enabled else "be skipped",
+        )
+        self._notify_global()
+
+    async def recalculate_today(self) -> Optional[CalculatorResult]:
+        """Run the calculator over current zone config + weather and cache.
+
+        Safe to call any time. Returns the new CalculatorResult, or None
+        if the zone store isn't loaded yet (early in startup). Fires
+        SIG_GLOBAL_UPDATE on success so the today_calculation sensor and
+        any other listeners refresh.
+        """
+        if self.zone_store is None:
+            return None
+
+        zones = self.zone_store.all_zones()
+        if not zones:
+            # No valves discovered yet — leave the cache alone (None) so
+            # the sensor reports unknown rather than "0 zones".
+            return None
+
+        weather = read_weather_inputs(
+            self.hass,
+            vpd_entity=self.weather_vpd_entity,
+            rain_today_entity=self.weather_rain_today_entity,
+            rain_forecast_24h_entity=self.weather_rain_forecast_24h_entity,
+            temp_entity=self.weather_temp_entity,
+        )
+        result = compute_calculator(
+            zones=zones,
+            weather=weather,
+            global_min_run_liters=self.global_min_run_liters,
+        )
+        self.today_calculation = result
+        _LOGGER.debug(
+            "📊 Calculator refreshed: vpd=%s rain=%s fc24=%s → %.2f L "
+            "across %d runnable zones",
+            weather.vpd_kpa, weather.rain_today_mm, weather.fc24_mm,
+            result.total_liters, result.runnable_zones,
+        )
+        self._notify_global()
+        return result
+
+    async def _periodic_recalculate_today(self, now=None) -> None:
+        """Time-interval wrapper around `recalculate_today` + the daily
+        aggregation refresh. Both run on the same 15-min cadence so the
+        Today and Insight tabs of the dashboard stay in lockstep.
+        """
+        try:
+            await self.recalculate_today()
+        except Exception as e:
+            _LOGGER.error("Periodic calculator refresh failed: %s", e, exc_info=True)
+        try:
+            await self.refresh_daily_summary()
+        except Exception as e:
+            _LOGGER.error("Periodic daily summary refresh failed: %s", e, exc_info=True)
+
+    async def refresh_daily_summary(self) -> Optional[DailySummary]:
+        """Rebuild the daily aggregation cache from the SQLite session
+        history and persist a snapshot to the JSON ZoneStore.
+
+        Safe to call any time. Returns the new `DailySummary`, or None if
+        there are no valves yet (in which case the existing cache, if
+        any, is preserved untouched).
+        """
+        if not self.valves:
+            return None
+        try:
+            summary = await build_daily_summary(self.db, self.valves)
+        except Exception as e:
+            _LOGGER.error("Daily summary build failed: %s", e, exc_info=True)
+            return None
+        self.daily_summary = summary
+        # Persist a snapshot so cold restart hydrates immediately.
+        if self.zone_store is not None:
+            try:
+                await self.zone_store.set_daily_summary(summary.to_dict())
+            except Exception as e:
+                _LOGGER.warning("Failed to persist daily summary snapshot: %s", e)
+        self._notify_global()
+        return summary
 
     @callback
     def _on_devices(self, msg) -> None:
@@ -324,6 +636,25 @@ class ValveManager:
             )
             _LOGGER.debug("Subscribed to %s/%s", self.base, topic)
 
+            # v4.0-alpha-1 — seed per-zone config defaults on first sight.
+            # ensure_zone is a no-op if the zone already has stored config,
+            # so this is safe to call on every startup.
+            if self.zone_store is not None:
+                try:
+                    await self.zone_store.ensure_zone(topic)
+                    # Refresh the calculator cache so the today_calculation
+                    # sensor has data as soon as zones exist (rather than
+                    # waiting up to 15 min for the periodic loop).
+                    await self.recalculate_today()
+                    # v4.0-alpha-4 — also refresh the daily aggregation
+                    # so the dashboard's Insight tab has data immediately
+                    # rather than waiting for the next 15-min tick.
+                    await self.refresh_daily_summary()
+                except Exception as e:
+                    _LOGGER.warning(
+                        "ZoneStore: failed to ensure zone '%s': %s", topic, e,
+                    )
+
             # Load persisted totals from local database
             totals = await self.db.load_valve_totals(topic)
             v.lifetime_total_liters = totals["lifetime_total_liters"]
@@ -344,6 +675,11 @@ class ValveManager:
             # Load last session start and end datetime
             v.last_session_start = await self.db.get_last_session_start(topic)
             v.last_session_end = await self.db.get_last_session_end(topic)
+
+            # v4.0-alpha-3 — rolling avg flow over recent sessions.
+            v.avg_flow_lpm_7d = await self.db.get_recent_avg_flow(
+                topic, lookback=HISTORICAL_FLOW_LOOKBACK_SESSIONS,
+            )
 
             _LOGGER.info("Loaded totals for %s: %.2f L lifetime, %.2f L resettable, %.2f L (24h), %.2f L (7d), last session: %s",
                         name, v.lifetime_total_liters, v.total_liters, v.last_24h_liters, v.last_7d_liters, v.last_session_start)
@@ -608,7 +944,29 @@ class ValveManager:
                             _LOGGER.debug(f"   last session start: {v.last_session_start}")
                             _LOGGER.debug(f"   last session end: {v.last_session_end}")
 
+                            # v4.0-alpha-3 — stamp the most-recent-session
+                            # liters and refresh the rolling avg flow so
+                            # the per-zone last_run_liters and avg_flow
+                            # sensors update immediately on session end.
+                            v.last_session_liters = round(captured_session_liters, 2)
+                            v.avg_flow_lpm_7d = await self.db.get_recent_avg_flow(
+                                captured_topic, lookback=HISTORICAL_FLOW_LOOKBACK_SESSIONS,
+                            )
+
                             self._dispatch_signal(sig_update(captured_topic))
+
+                            # v4.0-alpha-4 — refresh the daily aggregation
+                            # so the just-completed session shows up on
+                            # the dashboard chart immediately. Runs after
+                            # the session has been committed to the DB
+                            # (above) so the new row is included.
+                            try:
+                                await self.refresh_daily_summary()
+                            except Exception as e:
+                                _LOGGER.warning(
+                                    "Daily summary refresh on session end failed: %s",
+                                    e,
+                                )
                         self._schedule_task(_end_and_sync())
                         v.current_session_id = None
                     v.session_active = False
@@ -1082,6 +1440,15 @@ class ValveManager:
 
         # Notify the binary sensor (if loaded yet) to update its state.
         self._dispatch_signal("z2m_irrigation_panic_state_changed")
+
+        # v4.0-alpha-1 — invoke the user-configured kill switch (best-effort).
+        # This is the integration's last line of defense; the existing
+        # EVENT_PANIC_REQUIRED bus event still fires above so any external
+        # automations layered on top continue to work in parallel.
+        try:
+            self._call_kill_switch(panic_reason=reason)
+        except Exception as e:
+            _LOGGER.error("Kill switch invocation failed in panic flow: %s", e)
 
     def clear_panic(self, cleared_by: str = "manual") -> None:
         """Clear the panic state. Called by the
