@@ -74,3 +74,17 @@ run_schedule_now:
 reload_schedules:
   name: Reload schedules
   description: Reload all schedules from database
+
+clear_panic:
+  name: Clear panic state
+  description: >
+    Clear the integration's panic state. Call this after the underlying
+    issue (stuck valve, runaway irrigation) has been physically resolved
+    and you've manually verified that water is no longer flowing.
+  fields:
+    cleared_by:
+      name: Cleared by
+      description: Optional label for who/what cleared the panic (logged for audit).
+      required: false
+      selector:
+        text: {}

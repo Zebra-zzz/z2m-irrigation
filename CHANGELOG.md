@@ -2,6 +2,183 @@
 
 All notable changes to the Z2M Irrigation integration will be documented in this file.
 
+## [3.2.0] - 2026-04-08
+
+### 🏗️ Architectural shift — hardware-primary control
+
+After v3.1.2 shipped this morning, a real-world incident exposed the limits
+of software-only volume control: HA's flow integration is consistently
+under-reporting actual delivered volume by 10–40% (depending on flow rate),
+because the Sonoff SWV reports its `flow` field at only 1-decimal m³/h
+precision. This meant the v3.1.x at-target software failsafe was firing
+late or not at all in some scenarios.
+
+A series of bench tests on 2026-04-08 with a measured bucket revealed:
+
+- The device's `cyclic_quantitative_irrigation` hardware counter is
+  **highly accurate** (~2.5% off vs bucket-measured ground truth).
+- The device's `cyclic_timed_irrigation` hardware timer is accurate to ±2s
+  and a new SET fully replaces the previous timer countdown.
+- When BOTH `cyclic_quantitative_irrigation` AND `cyclic_timed_irrigation`
+  are sent in the same MQTT payload, the device honours **both
+  simultaneously** and **whichever fires first wins** (verified: a
+  50L+30s combined run closed at ~30s).
+- The device exposes `current_device_status` (`normal_state`,
+  `water_shortage`, `water_leakage`) which the integration was ignoring.
+- The device has `auto_close_when_water_shortage` (closes itself after
+  30 min of detected water shortage) which was disabled.
+
+Conclusion: shift to a **hardware-primary control architecture**. The
+device's own features handle the precise close at exactly the requested
+target. Software is now an observer + reporter + secondary safety net.
+
+This fundamentally improves accuracy AND restart resilience: HA can crash,
+reboot, lose MQTT, anything — the device still closes the valve when its
+own counter says target is reached.
+
+### ✨ New control flow
+
+`start_liters(target)` now publishes ONE MQTT command containing BOTH:
+- `cyclic_quantitative_irrigation: { irrigation_capacity: target }` —
+  primary close mechanism. Device measures own flow, closes at target.
+- `cyclic_timed_irrigation: { irrigation_duration: backstop_seconds }` —
+  time-based safety backstop in case the volume mode gets stuck (e.g.
+  blocked filter, dead flow sensor like the morning's Lilly Pilly issue).
+
+The time backstop is calculated as
+`(target_liters / historical_avg_flow) × HW_TIME_BACKSTOP_OVERSHOOT_RATIO (1.5)`,
+clamped to `[HW_TIME_BACKSTOP_MIN_SECONDS (10 min), HW_TIME_BACKSTOP_MAX_SECONDS (4 hours)]`.
+For valves with no historical data, falls back to
+`HW_TIME_BACKSTOP_DEFAULT_FLOW_LPM (2 L/min)`.
+
+### ✨ New: Adaptive hardware backstop refresh
+
+Every `HW_TIME_BACKSTOP_REFRESH_INTERVAL_SECONDS` (5 min) while a session
+is active, the integration recalculates the time backstop based on the
+**current observed flow** and **remaining liters**, and republishes a
+tighter timer if appropriate. As the run progresses, the safety window
+narrows. By the end of a run, the backstop is tight enough that any real
+problem gets caught within minutes.
+
+Safety floor: the new published timer is always at least
+`(REFRESH_INTERVAL + REFRESH_SAFETY_PADDING)` seconds in the future, so
+a single missed refresh due to MQTT/network lag doesn't cause early
+device closure.
+
+### ✨ New: Software 140% overshoot guardrail
+
+In v3.2 the device's quantitative_irrigation is the primary close. Software
+no longer fires at 100% — it fires at **140% as the secondary defence**, in
+case the device's hardware close failed AND flow is still being measured.
+
+This is independent of the hardware backstop. If the hardware close
+succeeds at exactly 100%, the software guardrail never triggers. If for any
+reason the device flow keeps reading above the target, software intervenes
+at 140%.
+
+### ✨ New: Panic system
+
+When the integration's normal failsafe mechanisms have been exhausted and
+water may still be flowing, fire panic events that an external automation
+can use to **kill an upstream device** (e.g., the main water pump). The
+integration itself does NOT directly control any upstream device — it only
+emits events. v4.0 will add a config field for an entity to turn off
+automatically.
+
+**Trip conditions:**
+1. The OFF retry chain (5 min of escalating retries) has been exhausted
+   and the device is still ON.
+2. Two or more valves are simultaneously in shutoff_in_progress retry
+   state for at least 60 seconds (indicates broader system failure).
+3. The software 140% overshoot guardrail fired AND the device is still
+   ON after `GUARDRAIL_SOFTWARE_OVERSHOOT_GRACE_SECONDS` (60s).
+
+**Outputs:**
+- New event: `z2m_irrigation_panic_required` (data: reason, affected_valves)
+- New event: `z2m_irrigation_panic_cleared` (data: reason, elapsed)
+- New entity: `binary_sensor.z2m_irrigation_panic` — turns ON when panic
+  active. State persists across HA restart via `RestoreEntity`.
+- Critical persistent notification.
+
+**Manual clear:** new service `z2m_irrigation.clear_panic`. Optional
+`cleared_by` parameter for audit logging. Wire this to a button/automation
+of your choice.
+
+### ✨ New: Device status monitoring
+
+The Sonoff SWV's `current_device_status` field is now read on every MQTT
+message. When it transitions away from `normal_state`, fire
+`z2m_irrigation_device_status_changed` event so external automations can
+alert the user to physical issues like water leakage or shortage.
+
+This is what would have caught Lilly Pilly's blocked filter situation
+this morning if we'd been watching the field.
+
+### ✨ New: Initial device safety setup
+
+When the integration first sees a valve, it pushes
+`auto_close_when_water_shortage: ENABLE` to the device. This is a free
+hardware-level safety net: the device closes itself after 30 min of
+detected water shortage, regardless of HA's state.
+
+### 🐛 Removed broken assumption
+
+The previous AI's comment in `start_liters` claimed
+"Sonoff SWV clears cyclic_quantitative_irrigation immediately after starting".
+This is NOT true on Frigate firmware v4100 (current). The device honours the
+quantitative target reliably. The comment was wrong; the architecture has
+been changed accordingly.
+
+### 📦 Files changed
+
+- `custom_components/z2m_irrigation/const.py` — new constants section for
+  v3.2 hardware-primary mode (~80 lines added). New `Platform.BINARY_SENSOR`.
+- `custom_components/z2m_irrigation/manager.py` — new dual-mode start_liters
+  (~250 lines), adaptive backstop refresh, software 140% guardrail, panic
+  system, device status monitoring, initial valve safety setup (~580 lines
+  added/changed)
+- `custom_components/z2m_irrigation/binary_sensor.py` — **new file** —
+  PanicSensor with restore_state
+- `custom_components/z2m_irrigation/__init__.py` — register new
+  `clear_panic` service
+- `custom_components/z2m_irrigation/services.yaml` — describe new service
+- `custom_components/z2m_irrigation/manifest.json` — bump to `3.2.0`
+
+No DB schema changes. Backward compatible — installs cleanly over v3.1.2.
+
+### ⚠️ Known caveats
+
+- **Stats accuracy**: software `session_used` will continue to under-report
+  actual delivered volume by 10–40% depending on flow rate (this is the
+  device's flow precision limit, not a bug). The dashboard numbers will
+  look slightly low compared to what was actually delivered. The TOTAL
+  volume delivered is correct because the device closes at the right
+  target — only the per-message integration is imprecise.
+- **The v3.2 design assumes the device honors `cyclic_quantitative_irrigation`
+  reliably**. Bench-tested true on this firmware (v4100). If a future
+  firmware breaks this, the software 140% guardrail and panic system are
+  the safety nets.
+- **Panic state survives restart** (via restore_state). To clear after
+  resolving the underlying issue, call `z2m_irrigation.clear_panic`.
+
+### 🧪 Test plan after merge
+
+1. Tag `v3.2.0`, deploy, restart HA Core
+2. Verify on startup: addon logs show "Pushed initial device safety:
+   {valve} auto_close_when_water_shortage=ENABLE" for each valve
+3. Verify `binary_sensor.z2m_irrigation_panic` is `off`
+4. Run a small `start_liters(5)` test on Front Garden and watch the logs:
+   - "🚿 Starting volume run" log line
+   - "📤 Published dual-mode start" with both quantitative and time targets
+   - Adaptive refresh ticks every 5 min (won't see this for short runs)
+   - Clean session end at ~5L
+5. Optionally trip the 140% guardrail by setting a smaller test target
+   (e.g. 1L) on a fast-flow valve and watching it overshoot (would need
+   to artificially block hardware close to truly test — skip unless
+   carefully).
+
+---
+
 ## [3.1.2] - 2026-04-08
 
 ### 🐛 Critical hotfix — thread-safety bug bricked the at-target failsafe
