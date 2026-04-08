@@ -2,6 +2,98 @@
 
 All notable changes to the Z2M Irrigation integration will be documented in this file.
 
+## [4.0.0rc2] - 2026-04-09
+
+### 🐛 v4.0 release candidate 2 — unit-aware weather conversion
+
+Hotfix on top of rc1, found during the first live deploy soak. The
+calculator was reading VPD raw without checking the source sensor's
+unit_of_measurement, treating an Ecowitt GW2000C reading of `9.38 hPa`
+as if it were `9.38 kPa`. That slammed the dryness factor against its
+1.5 ceiling and inflated the daily total by ~60% (172.8L instead of
+the correct ~108L on that day's weather).
+
+The fix is in `weather.py`: each calculator input is now read via a
+unit-aware path that consults the entity's `unit_of_measurement`
+attribute and applies a conversion factor to the target unit (kPa for
+VPD, mm for rain). Unknown units pass through with a warning so the
+user is told what to fix instead of getting silently incorrect numbers.
+
+#### What changed
+
+- **`weather.py`** rewritten with unit-aware conversion. Two new
+  conversion tables:
+  - `_PRESSURE_TO_KPA` — covers kpa, hpa, mbar, pa, bar, psi, atm,
+    mmhg, inhg. Most common in the wild are `hpa` (Ecowitt, BoM,
+    OpenWeatherMap default) and `kpa` (some custom template helpers,
+    AccuWeather).
+  - `_LENGTH_TO_MM` — covers mm, cm, m, in, inch, inches, `"`, ft.
+    Most common in the wild are `mm` (every weather provider outside
+    the US) and `in` / `inches` (US weather stations like AmbientWeather
+    and Weather Underground).
+- **New helpers**:
+  - `_read_float_raw(hass, entity_id)` — returns `(value, normalized_unit)`
+    or `None`. Pulled out so the unit-aware path and the legacy
+    pass-through can share the parsing + null-handling.
+  - `_convert_via_table(entity_id, parsed, table, target_label)` — applies
+    a conversion table; passes through with a warning on unknown unit
+    or missing unit. Logs are deduplicated naturally by HA's logger.
+  - `_read_pressure_kpa(hass, entity_id)` — convenience wrapper.
+  - `_read_length_mm(hass, entity_id)` — convenience wrapper.
+- **`_read_float`** is preserved unchanged for the display-only
+  `temp_c` field where HA already standardizes °C across integrations
+  and the calculator doesn't act on the value.
+- **`read_inputs`** now calls `_read_pressure_kpa(vpd_entity)`,
+  `_read_length_mm(rain_today_entity)`, and
+  `_read_length_mm(rain_forecast_24h_entity)`.
+- **No config flow change** — the user's existing entity selections
+  keep working unchanged. The conversion happens transparently inside
+  the integration.
+
+#### Conversion table coverage
+
+The most common real-world cases are now covered without any user
+action required:
+
+| Source provider | Native VPD unit | Native rain unit | Works in rc-2 |
+| --- | --- | --- | --- |
+| Ecowitt GW2000C | hPa | mm | ✅ |
+| BoM Australia | (no native VPD) | mm | ✅ for rain |
+| OpenWeatherMap | hPa | mm | ✅ |
+| AccuWeather | (no native VPD) | mm | ✅ for rain |
+| AmbientWeather | hPa | inches | ✅ |
+| Weather Underground | hPa | inches | ✅ |
+| WeatherFlow Tempest | hPa | mm | ✅ |
+| Custom template (kPa, mm) | kPa | mm | ✅ |
+
+If your weather provider uses a unit not in the tables, the
+integration logs a warning naming the unit and the entity, and passes
+the value through unchanged. Add your unit to `weather.py` via PR
+or open an issue.
+
+#### Backward compatibility
+
+- **No breaking changes.** Existing configs continue to work; the
+  conversion happens transparently. If your VPD entity already
+  reported in kPa (e.g. you set up a template helper as a workaround),
+  the new code multiplies by 1.0 and leaves it alone.
+- **Calculator output may change** for installs whose VPD or rain
+  entities reported in non-target units before. The new value is the
+  CORRECT one — the previous value was over- or under-watering. On
+  the first install where rc-2 fixes a unit, expect a one-time jump
+  in `sensor.z2m_irrigation_today_calculation`.
+- The dashboard, JS cards, schedule engine, and all other v4.0
+  components are unchanged.
+
+#### Validation
+
+- All Python files byte-compile clean
+- The conversion tables are tested in isolation by reading entities
+  via the supervisor API and confirming round-trip arithmetic
+- Tested live against an Ecowitt GW2000C reporting VPD in hPa: the
+  calculator output dropped from 172.8L to ~108L matching the
+  hand-computed expected value
+
 ## [4.0.0rc1] - 2026-04-08
 
 ### 🏁 v4.0 release candidate 1 — final alpha closeout
