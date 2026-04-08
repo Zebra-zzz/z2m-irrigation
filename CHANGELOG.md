@@ -2,6 +2,80 @@
 
 All notable changes to the Z2M Irrigation integration will be documented in this file.
 
+## [3.1.2] - 2026-04-08
+
+### 🐛 Critical hotfix — thread-safety bug bricked the at-target failsafe
+
+Real-world morning irrigation run on 2026-04-08 hit the bug. The smart
+irrigation automation triggered Front Garden + Back Garden + Lilly Pilly
+runs at sunrise. When Front Garden's volume hit its 324 L target, the
+at-target failsafe in `_on_state` fired exactly as designed, set
+`shutoff_in_progress = True`, logged the warning, and then **crashed
+inside `hass.bus.async_fire(EVENT_SHUTOFF_INITIATED, …)`** with
+
+```
+RuntimeError: Detected ... non-thread-safe operation: ...
+```
+
+because `_on_state` is the MQTT message callback which runs from a
+SyncWorker thread, not the HA event loop. HA's strict mode aborted the
+call before the OFF retry chain could be scheduled.
+
+Result: `shutoff_in_progress` was set to `True` (blocking subsequent
+re-fires of the failsafe via the gate `if v.state == "ON" and not
+v.shutoff_in_progress:`) but **no OFF was ever published to the device**.
+Front Garden ran past its target indefinitely. Back Garden hit the same
+code path and the same bug, ran ~3× target before manual intervention.
+
+The Layer 1–4 guardrails in `_guardrail_tick` did NOT hit the bug because
+that loop is registered via `async_track_time_interval` which always runs
+on the event loop thread. The bug was specific to code paths called from
+the MQTT worker thread:
+
+| Call site | Thread | Affected? |
+|---|---|---|
+| `_initiate_shutoff` from `_on_state` (at-target failsafe) | SyncWorker | ❌ broken |
+| `_initiate_shutoff` from `_guardrail_tick` (Layers 1-3) | MainThread | ✅ worked |
+| State→OFF transition `EVENT_SHUTOFF_CONFIRMED` in `_on_state` | SyncWorker | ❌ broken |
+| `_attempt_shutoff` `EVENT_SHUTOFF_FAILED` (via `async_call_later`) | MainThread | ✅ worked |
+| `_create_persistent_notification` | depends on caller | ❌ broken when called from worker |
+| Orphan recovery `EVENT_ORPHANED_SESSION_RECOVERED` (via `EVENT_HOMEASSISTANT_STARTED`) | MainThread | ✅ worked |
+
+#### Fix
+
+Two new helpers, both safe to call from any thread:
+
+- **`_fire_event(event_type, event_data)`** — wraps `hass.bus.async_fire`
+  via `hass.loop.call_soon_threadsafe`
+- **`_create_persistent_notification`** — already existed, now wraps the
+  whole `hass.async_create_task` + `services.async_call` chain via
+  `loop.call_soon_threadsafe`
+
+Every direct `self.hass.bus.async_fire(...)` call in `manager.py` is now
+replaced with `self._fire_event(...)`. The in-thread-loop call sites that
+weren't actually broken are also converted to use the helper, for
+consistency and to prevent future regressions.
+
+#### Files changed
+
+- `custom_components/z2m_irrigation/manager.py` — add `_fire_event` helper,
+  replace all 5 `hass.bus.async_fire` call sites, fix `_create_persistent_notification`
+- `custom_components/z2m_irrigation/manifest.json` — bump to `3.1.2`
+
+No schema changes, no behaviour changes outside of "the failsafe now
+actually fires". The 5 guardrails, OFF retry chain, and at-target failsafe
+are otherwise identical to v3.1.1.
+
+#### Note on data loss during this incident
+
+The morning run lost an estimated ~600-1000 L of water across Front Garden
+and Back Garden before manual `mqtt.publish` OFF intervention at 10:24
+AEST. Lilly Pilly was unaffected by this bug (its session never reached
+the at-target failsafe path) but had a separate physical flow blockage
+that prevented water from reaching the plants — investigated separately.
+
+---
+
 ## [3.1.1] - 2026-04-07
 
 ### 🐛 Hotfix — orphan recovery: defer side-effects until HA fully started

@@ -216,6 +216,24 @@ class ValveManager:
         """Always fire dispatcher on HA loop thread (safe from any callback thread)."""
         self.hass.add_job(async_dispatcher_send, self.hass, signal, *args)
 
+    def _fire_event(self, event_type: str, event_data: Dict) -> None:
+        """Thread-safe wrapper for hass.bus.async_fire.
+
+        v3.1.2 — `hass.bus.async_fire` MUST be called from the event loop
+        thread. Several call sites (the at-target failsafe in `_on_state`, the
+        shutoff confirmation in the state-OFF transition, etc) run from MQTT
+        worker threads where this is unsafe and HA throws
+        `RuntimeError: ... non-thread-safe operation ...`. That bug bricked
+        the failsafe path in v3.1.0 / v3.1.1 — see the audit notes in
+        AUDIT-2026-04-08-v3.1.2.md.
+
+        This helper marshals the call onto the event loop via
+        `loop.call_soon_threadsafe`, which is safe from any thread.
+        """
+        self.hass.loop.call_soon_threadsafe(
+            self.hass.bus.async_fire, event_type, event_data
+        )
+
     @callback
     def _on_devices(self, msg) -> None:
         try:
@@ -400,7 +418,7 @@ class ValveManager:
                         "✅ Shutoff confirmed for %s (reason=%s, attempts=%d, elapsed=%.1fs)",
                         topic, v.shutoff_reason, v.shutoff_attempt, elapsed,
                     )
-                    self.hass.bus.async_fire(
+                    self._fire_event(
                         EVENT_SHUTOFF_CONFIRMED,
                         {
                             "valve": topic,
@@ -690,7 +708,7 @@ class ValveManager:
             v.target_liters or 0.0,
             v.session_liters,
         )
-        self.hass.bus.async_fire(
+        self._fire_event(
             EVENT_SHUTOFF_INITIATED,
             {
                 "valve": v.topic,
@@ -762,7 +780,7 @@ class ValveManager:
                 "Manual intervention required!",
                 v.topic, attempt, elapsed,
             )
-            self.hass.bus.async_fire(
+            self._fire_event(
                 EVENT_SHUTOFF_FAILED,
                 {
                     "valve": v.topic,
@@ -807,22 +825,32 @@ class ValveManager:
                                          notification_id: str) -> None:
         """Helper to fire persistent_notification.create. Best-effort; failures
         are swallowed because notifications must never block safety-critical
-        code paths."""
-        try:
-            self.hass.async_create_task(
-                self.hass.services.async_call(
-                    "persistent_notification",
-                    "create",
-                    {
-                        "title": title,
-                        "message": message,
-                        "notification_id": notification_id,
-                    },
-                    blocking=False,
+        code paths.
+
+        v3.1.2 — `hass.services.async_call` and `hass.async_create_task` BOTH
+        require the event loop thread. This helper must be safe to call from
+        any thread (worker threads in MQTT callbacks, the periodic guardrail
+        tick which IS on the loop, etc), so we marshal via
+        `loop.call_soon_threadsafe`.
+        """
+        def _do_create() -> None:
+            try:
+                self.hass.async_create_task(
+                    self.hass.services.async_call(
+                        "persistent_notification",
+                        "create",
+                        {
+                            "title": title,
+                            "message": message,
+                            "notification_id": notification_id,
+                        },
+                        blocking=False,
+                    )
                 )
-            )
-        except Exception as e:
-            _LOGGER.error("Failed to create persistent notification: %s", e)
+            except Exception as e:
+                _LOGGER.error("Failed to create persistent notification: %s", e)
+
+        self.hass.loop.call_soon_threadsafe(_do_create)
 
     # ─────────────────────────────────────────────────────────────────────
     # v3.1 — Safety: periodic guardrail loop
@@ -1040,7 +1068,7 @@ class ValveManager:
                         topic, e,
                     )
                 # Fire one event per unique valve.
-                self.hass.bus.async_fire(
+                self._fire_event(
                     EVENT_ORPHANED_SESSION_RECOVERED,
                     {
                         "valve": topic,
