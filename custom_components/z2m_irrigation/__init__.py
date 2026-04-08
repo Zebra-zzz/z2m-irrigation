@@ -26,10 +26,13 @@ SERVICE_ENABLE_SCHEDULE = "enable_schedule"
 SERVICE_DISABLE_SCHEDULE = "disable_schedule"
 SERVICE_RUN_SCHEDULE = "run_schedule_now"
 SERVICE_RELOAD_SCHEDULES = "reload_schedules"
+# v3.2 — Panic system manual clear
+SERVICE_CLEAR_PANIC = "clear_panic"
 
 SCHEMA_START_TIMED = vol.Schema({vol.Required("valve"): cv.string, vol.Required("minutes"): vol.Coerce(float)})
 SCHEMA_START_LITERS = vol.Schema({vol.Required("valve"): cv.string, vol.Required("liters"): vol.Coerce(float)})
 SCHEMA_RESET_TOTALS = vol.Schema({vol.Optional("valve"): cv.string})
+SCHEMA_CLEAR_PANIC = vol.Schema({vol.Optional("cleared_by"): cv.string})
 SCHEMA_CREATE_SCHEDULE = vol.Schema({
     vol.Required("name"): cv.string,
     vol.Required("valve"): cv.string,
@@ -140,6 +143,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return
         await scheduler.reload_schedules()
 
+    async def _clear_panic(call):
+        """v3.2 — Manual clear of the panic state."""
+        cleared_by = call.data.get("cleared_by", "service_call")
+        mgr.clear_panic(cleared_by=cleared_by)
+
     hass.services.async_register(DOMAIN, SERVICE_START_TIMED, _start_timed, SCHEMA_START_TIMED)
     hass.services.async_register(DOMAIN, SERVICE_START_LITERS, _start_liters, SCHEMA_START_LITERS)
     hass.services.async_register(DOMAIN, SERVICE_RESET_TOTALS, _reset_totals, SCHEMA_RESET_TOTALS)
@@ -151,6 +159,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(DOMAIN, SERVICE_DISABLE_SCHEDULE, _disable_schedule, SCHEMA_DISABLE_SCHEDULE)
     hass.services.async_register(DOMAIN, SERVICE_RUN_SCHEDULE, _run_schedule, SCHEMA_RUN_SCHEDULE)
     hass.services.async_register(DOMAIN, SERVICE_RELOAD_SCHEDULES, _reload_schedules)
+    hass.services.async_register(DOMAIN, SERVICE_CLEAR_PANIC, _clear_panic, SCHEMA_CLEAR_PANIC)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     await mgr.async_start()

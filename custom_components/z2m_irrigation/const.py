@@ -15,7 +15,12 @@ SIG_NEW_VALVE = "z2m_irrigation_new_valve"
 def sig_update(topic: str) -> str:
     return f"z2m_irrigation_update::{topic}"
 
-PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.NUMBER]
+PLATFORMS = [
+    Platform.SENSOR,
+    Platform.SWITCH,
+    Platform.NUMBER,
+    Platform.BINARY_SENSOR,  # v3.2 — panic indicator
+]
 
 MANUFACTURER = "Sonoff"
 MODEL = "SWV"
@@ -72,3 +77,131 @@ EVENT_SHUTOFF_INITIATED = "z2m_irrigation_shutoff_initiated"
 EVENT_SHUTOFF_CONFIRMED = "z2m_irrigation_shutoff_confirmed"
 EVENT_SHUTOFF_FAILED = "z2m_irrigation_shutoff_failed"
 EVENT_ORPHANED_SESSION_RECOVERED = "z2m_irrigation_orphaned_session_recovered"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v3.2 — Hardware-primary control & adaptive backstop
+#
+# Background: extensive testing on 2026-04-08 against the Sonoff SWV revealed:
+#   1. The device's cyclic_quantitative_irrigation hardware counter is highly
+#      accurate (~2.5% vs bucket measurement)
+#   2. The device's cyclic_timed_irrigation hardware timer is accurate to ±2s
+#      and a new SET fully replaces the previous timer (countdown restarts
+#      from receipt time)
+#   3. When BOTH cyclic_quantitative_irrigation AND cyclic_timed_irrigation
+#      are set in the same payload, the device honors BOTH simultaneously and
+#      whichever fires first wins (a 50L+30s combined run closed at ~30s)
+#   4. The device exposes its own flow only at 1-decimal m³/h precision,
+#      causing software flow integration to be ±10-40% inaccurate depending
+#      on actual flow rate
+#
+# Conclusion: shift the architecture so that the device's hardware features
+# are the PRIMARY control mechanism, and software is a monitor/backup.
+# See AUDIT-2026-04-08-v3.2.md for the full investigation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# When start_liters() runs, both quantitative and timed are published. Volume
+# target is set to the user's exact request. Time target is calculated as
+# `(target_liters / historical_avg_flow) × HW_TIME_BACKSTOP_OVERSHOOT_RATIO`,
+# subject to a min and max bound.
+HW_TIME_BACKSTOP_OVERSHOOT_RATIO = 1.5  # 150% of expected duration
+
+# Min bound: even very small runs get at least this many seconds of timer
+# (so the device timer doesn't fire prematurely on the first refresh).
+HW_TIME_BACKSTOP_MIN_SECONDS = 600  # 10 minutes
+
+# Max bound: even huge runs cap the time backstop here (so a stuck-flow
+# scenario gets caught within this window even if the historical average
+# was very low).
+HW_TIME_BACKSTOP_MAX_SECONDS = 14400  # 4 hours
+
+# When no historical flow data is available (first ever run on a valve),
+# use this conservative default flow rate for the time backstop calculation.
+HW_TIME_BACKSTOP_DEFAULT_FLOW_LPM = 2.0  # L/min
+
+# Adaptive refresh: every N seconds, recalculate the time backstop based on
+# current observed flow and remaining liters, and republish a tighter timer
+# if appropriate. The hardware timer always counts from receipt of each
+# new SET, so this naturally narrows as the run progresses.
+HW_TIME_BACKSTOP_REFRESH_INTERVAL_SECONDS = 300  # 5 minutes
+
+# Safety floor when refreshing: the new published timer must always be at
+# least (next refresh interval + this padding) seconds in the future, so a
+# single missed refresh due to MQTT/network lag doesn't cause the device to
+# close prematurely.
+HW_TIME_BACKSTOP_REFRESH_SAFETY_PADDING_SECONDS = 120  # 2 minutes
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v3.2 — Software 140% overshoot guardrail
+#
+# Independent of the hardware backstop, software still tracks session_used
+# and fires a force-OFF if it crosses 140% of the target. This is the tight
+# protection layer for cases where the device's hardware mechanisms succeed
+# in delivering water but the software's view of "how much" is correct
+# enough to trigger early.
+#
+# Note: software session_used is consistently UNDER actual delivered volume
+# due to the device's 1-decimal m³/h precision. So this guardrail effectively
+# fires somewhere between ~140% and ~180% of actual delivered volume,
+# depending on flow rate. That's still a useful upper bound.
+# ─────────────────────────────────────────────────────────────────────────────
+
+GUARDRAIL_SOFTWARE_OVERSHOOT_RATIO = 1.40  # 140% of target
+
+# After firing the software overshoot guardrail, give the device this many
+# seconds to actually close before treating it as a panic-level failure.
+GUARDRAIL_SOFTWARE_OVERSHOOT_GRACE_SECONDS = 60
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v3.2 — Panic system (catastrophic failure escalation)
+#
+# When the integration's normal failsafe mechanisms have been exhausted and
+# water is still flowing, fire panic events that an external automation can
+# use to kill an upstream device (e.g., the main water pump). The integration
+# itself does NOT directly control any upstream device — it only emits
+# events. v4.0 will add a config field for an entity to turn off directly.
+#
+# Trip conditions (any one of these is enough):
+#   1. The OFF retry chain (5 minutes of escalating retries) has exhausted
+#      and the device is still ON.
+#   2. Two or more valves are simultaneously in shutoff_in_progress state
+#      with retry chains running (indicates broader system failure).
+#   3. The software 140% overshoot guardrail fired AND the device is still
+#      ON after GUARDRAIL_SOFTWARE_OVERSHOOT_GRACE_SECONDS.
+#
+# Manual clear via service `z2m_irrigation.clear_panic`.
+# Panic state survives HA restart (persisted via restore_state on the
+# binary_sensor).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Minimum number of valves in shutoff_in_progress state to trip panic
+# condition #2 (multiple-valve failure).
+PANIC_MULTIPLE_VALVES_THRESHOLD = 2
+
+EVENT_PANIC_REQUIRED = "z2m_irrigation_panic_required"
+EVENT_PANIC_CLEARED = "z2m_irrigation_panic_cleared"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v3.2 — Device status monitoring
+#
+# The Sonoff SWV exposes `current_device_status` which can be one of:
+#   - normal_state
+#   - water_shortage
+#   - water_leakage
+#   - water_shortage & water_leakage
+#
+# When this transitions away from normal_state, fire an event so external
+# automations can alert the user.
+# ─────────────────────────────────────────────────────────────────────────────
+
+EVENT_DEVICE_STATUS_CHANGED = "z2m_irrigation_device_status_changed"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v3.2 — Initial valve setup
+#
+# When the integration first sees a valve, push these settings to ensure
+# device-side safety features are enabled:
+#   - auto_close_when_water_shortage = ENABLE
+#     (device closes itself after 30 min of detected water shortage)
+# ─────────────────────────────────────────────────────────────────────────────
+
+INITIAL_VALVE_AUTO_CLOSE_WHEN_WATER_SHORTAGE = "ENABLE"

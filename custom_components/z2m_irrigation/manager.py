@@ -33,6 +33,20 @@ from .const import (
     EVENT_SHUTOFF_CONFIRMED,
     EVENT_SHUTOFF_FAILED,
     EVENT_ORPHANED_SESSION_RECOVERED,
+    # v3.2 — Hardware-primary control
+    HW_TIME_BACKSTOP_OVERSHOOT_RATIO,
+    HW_TIME_BACKSTOP_MIN_SECONDS,
+    HW_TIME_BACKSTOP_MAX_SECONDS,
+    HW_TIME_BACKSTOP_DEFAULT_FLOW_LPM,
+    HW_TIME_BACKSTOP_REFRESH_INTERVAL_SECONDS,
+    HW_TIME_BACKSTOP_REFRESH_SAFETY_PADDING_SECONDS,
+    GUARDRAIL_SOFTWARE_OVERSHOOT_RATIO,
+    GUARDRAIL_SOFTWARE_OVERSHOOT_GRACE_SECONDS,
+    PANIC_MULTIPLE_VALVES_THRESHOLD,
+    EVENT_PANIC_REQUIRED,
+    EVENT_PANIC_CLEARED,
+    EVENT_DEVICE_STATUS_CHANGED,
+    INITIAL_VALVE_AUTO_CLOSE_WHEN_WATER_SHORTAGE,
 )
 from .database import IrrigationDatabase
 
@@ -101,6 +115,55 @@ class Valve:
     # at startup). Currently only used for log labelling.
     recovered_from_orphan: bool = False
 
+    # ───────────────────────────────────────────────────────────────────
+    # v3.2 — Hardware-primary control state
+    # ───────────────────────────────────────────────────────────────────
+
+    # The current device-side cyclic_timed_irrigation duration we set, in
+    # seconds. Used to track whether the next adaptive refresh would
+    # actually narrow the timer (skip refresh if no improvement).
+    hw_time_backstop_seconds: Optional[int] = None
+
+    # Cancel handle for the periodic adaptive refresh task. Cleared when
+    # the session ends or shutoff completes.
+    hw_backstop_refresh_cancel: Optional[Callable[[], None]] = None
+
+    # Tracks whether the software 140% overshoot guardrail has fired for
+    # this session. After firing, we wait
+    # GUARDRAIL_SOFTWARE_OVERSHOOT_GRACE_SECONDS for the device to actually
+    # close before treating it as a panic-level escalation.
+    software_overshoot_fired: bool = False
+    software_overshoot_fired_ts: float = 0.0
+
+    # Latest device status from `current_device_status` MQTT field.
+    device_status: str = "normal_state"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v3.2 — System-level panic state (singleton on the manager, not per-valve)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class PanicState:
+    """Tracks whether the integration is currently in a panic state and why.
+
+    A panic is triggered when the integration's normal failsafe mechanisms
+    have been exhausted and water may still be flowing uncontrollably. The
+    integration fires HA bus events that the user can hook to kill an
+    upstream device (e.g. main water pump). The integration itself does not
+    directly control any upstream device.
+
+    Manual clear via the `z2m_irrigation.clear_panic` service.
+    Persisted via restore_state on the binary_sensor so panic survives HA
+    restart.
+    """
+    active: bool = False
+    reason: str = ""               # human-readable reason
+    triggered_at: float = 0.0      # monotonic time
+    triggered_at_iso: str = ""     # wall clock for the events / notification
+    affected_valves: list = field(default_factory=list)
+
+
 class ValveManager:
     def __init__(
         self,
@@ -116,6 +179,11 @@ class ValveManager:
         self.valves: Dict[str, Valve] = {}
         self._unsubs: list[Callable[[], None]] = []
         self.db = IrrigationDatabase(hass)
+
+        # v3.2 — System-level panic state. Single instance shared across all
+        # valves. Set by the various trip conditions, cleared by the
+        # `z2m_irrigation.clear_panic` service or by external automation.
+        self.panic: PanicState = PanicState()
 
     def _schedule_task(self, coro):
         """Schedule an async task from a callback (thread-safe)."""
@@ -295,6 +363,32 @@ class ValveManager:
             _LOGGER.info("Loaded totals for %s: %.2f L lifetime, %.2f L resettable, %.2f L (24h), %.2f L (7d), last session: %s",
                         name, v.lifetime_total_liters, v.total_liters, v.last_24h_liters, v.last_7d_liters, v.last_session_start)
 
+            # v3.2 — Push initial device-level safety settings. The
+            # auto_close_when_water_shortage feature makes the device close
+            # itself after 30 min of detected water shortage, regardless of
+            # what HA does. This is a free additional safety net.
+            try:
+                await mqtt.async_publish(
+                    self.hass,
+                    f"{self.base}/{topic}/set",
+                    json.dumps({
+                        "auto_close_when_water_shortage":
+                            INITIAL_VALVE_AUTO_CLOSE_WHEN_WATER_SHORTAGE,
+                    }),
+                    qos=1,
+                )
+                _LOGGER.info(
+                    "🛡️  Pushed initial device safety: %s "
+                    "auto_close_when_water_shortage=%s",
+                    topic, INITIAL_VALVE_AUTO_CLOSE_WHEN_WATER_SHORTAGE,
+                )
+            except Exception as e:
+                _LOGGER.warning(
+                    "Could not push initial device safety to %s "
+                    "(MQTT not ready?): %s",
+                    topic, e,
+                )
+
         self.hass.async_create_task(_sub())
 
         # announce new valve safely
@@ -325,34 +419,44 @@ class ValveManager:
                 v.last_progress_ts = now
                 v.last_progress_value = v.session_liters
 
-        # FAILSAFE: Check targets even when valve is ON (not just during session_active)
-        # This ensures we catch cases where device fails to stop.
-        # v3.1 — Skip the at-target failsafe entirely if a shutoff is already
-        # in progress; the OFF retry chain owns the valve until confirmed.
+        # ─────────────────────────────────────────────────────────────────
+        # v3.2 — Software 140% overshoot guardrail
+        #
+        # In v3.2 the device's cyclic_quantitative_irrigation handles the
+        # primary close at the exact target. Software no longer fires at
+        # 100% — it fires at 140% as the secondary defense, in case the
+        # device's hardware close failed AND flow is still being measured.
+        # If the device responds normally to the OFF, the retry chain
+        # confirms within seconds. If it doesn't, the panic system
+        # escalates after a grace period (see _check_panic_conditions).
+        # ─────────────────────────────────────────────────────────────────
         if v.state == "ON" and not v.shutoff_in_progress:
-            # FAILSAFE: Check if volume target reached (backup to native device control)
             if v.target_liters and v.target_liters > 0:
-                if v.session_liters >= v.target_liters:
+                overshoot_threshold = (
+                    v.target_liters * GUARDRAIL_SOFTWARE_OVERSHOOT_RATIO
+                )
+                if v.session_liters >= overshoot_threshold:
                     _LOGGER.warning(
-                        "FAILSAFE: Volume target reached for %s: %.2f/%.2f L - initiating shutoff",
-                        topic, v.session_liters, v.target_liters
+                        "🛡️  Software 140%% overshoot guardrail tripped for %s: "
+                        "%.2f / %.2f L (%.1f%% of target). Hardware close should "
+                        "have already fired — initiating shutoff and starting "
+                        "panic grace timer.",
+                        topic, v.session_liters, v.target_liters,
+                        (v.session_liters / v.target_liters * 100),
                     )
-                    # v3.1 — Hand off to the shutoff state machine instead of
-                    # publishing OFF once and clearing target_liters. The
-                    # state machine will retry OFF until confirmed and only
-                    # then clean up. target_liters stays set so guardrails
-                    # remain meaningful.
-                    self._initiate_shutoff(v, "volume_target_reached")
+                    if not v.software_overshoot_fired:
+                        v.software_overshoot_fired = True
+                        v.software_overshoot_fired_ts = now
+                    self._initiate_shutoff(v, "software_overshoot_140pct")
                     return
                 else:
-                    # Debug log to see progress
                     _LOGGER.debug(
                         "Volume run progress for %s: %.2f/%.2f L (%.1f%%), flow: %.2f L/min",
                         topic, v.session_liters, v.target_liters,
                         (v.session_liters / v.target_liters * 100), v.flow_lpm
                     )
 
-                    # v3.1 — Layer 4: warn if elapsed exceeds expected duration.
+                    # Layer 4 (v3.1): warn if elapsed exceeds expected duration.
                     if (
                         v.expected_duration_min is not None
                         and not v.expected_duration_warned
@@ -365,12 +469,12 @@ class ValveManager:
                                 "⏱️  Run for %s is taking longer than expected: "
                                 "elapsed=%.1fmin, expected≤%.1fmin, progress=%.2f/%.2f L. "
                                 "Possible degraded flow (clog, pressure drop). "
-                                "Will continue until target or other guardrail fires.",
+                                "Hardware close should still occur at target.",
                                 topic, elapsed_min, v.expected_duration_min,
                                 v.session_liters, v.target_liters,
                             )
 
-            # FAILSAFE: Check if time target reached (backup to native device control)
+            # Time-based failsafe (legacy `start_timed` path) — unchanged from v3.1.
             if v.session_end_ts and v.session_start_ts > 0:
                 if now >= v.session_end_ts:
                     elapsed_min = (now - v.session_start_ts) / 60.0
@@ -381,6 +485,28 @@ class ValveManager:
                     )
                     self._initiate_shutoff(v, "time_target_reached")
                     return
+
+        # v3.2 — Surface device's `current_device_status` field. Fire an
+        # event when it transitions away from normal so external automations
+        # can alert the user (separate from the panic system).
+        if "current_device_status" in data:
+            new_status = str(data.get("current_device_status") or "normal_state")
+            if new_status != v.device_status:
+                old_status = v.device_status
+                v.device_status = new_status
+                _LOGGER.warning(
+                    "📡 Device status changed for %s: %s → %s",
+                    topic, old_status, new_status,
+                )
+                self._fire_event(
+                    EVENT_DEVICE_STATUS_CHANGED,
+                    {
+                        "valve": topic,
+                        "name": v.name,
+                        "old_status": old_status,
+                        "new_status": new_status,
+                    },
+                )
 
         # state transitions
         if "state" in data:
@@ -438,6 +564,20 @@ class ValveManager:
                     v.shutoff_reason = ""
                     v.shutoff_attempt = 0
                     v.shutoff_started_ts = 0.0
+
+                # v3.2 — Cancel adaptive hardware backstop refresh task and
+                # clear the software overshoot tracking, since the session
+                # has ended (whether by hardware close, software shutoff, or
+                # manual intervention).
+                if v.hw_backstop_refresh_cancel:
+                    try:
+                        v.hw_backstop_refresh_cancel()
+                    except Exception:
+                        pass
+                    v.hw_backstop_refresh_cancel = None
+                v.hw_time_backstop_seconds = None
+                v.software_overshoot_fired = False
+                v.software_overshoot_fired_ts = 0.0
                 if v.session_active:
                     session_duration = (now - v.session_start_ts) / 60.0
                     avg_flow = v.session_liters / session_duration if session_duration > 0 else 0
@@ -603,7 +743,32 @@ class ValveManager:
                 self._schedule_task(_reset_in_database(topic))
 
     def start_liters(self, topic: str, liters: float) -> None:
-        """Start valve for specified liters - HA monitoring only (device clears native commands)"""
+        """Start a volume-targeted irrigation run.
+
+        v3.2 — Hardware-primary architecture. The Sonoff SWV's
+        `cyclic_quantitative_irrigation` is the **primary** control mechanism;
+        the device measures its own flow and closes itself when the target
+        is reached (verified ~2.5% accurate via bucket test on 2026-04-08).
+
+        We ALSO publish a `cyclic_timed_irrigation` time backstop in the same
+        payload — the device honors both simultaneously and whichever fires
+        first wins (verified by dual-mode test on 2026-04-08).
+
+        Software still tracks `session_used` for stats/UI but is NOT the
+        primary control mechanism. Software guardrails remain as additional
+        defence-in-depth (140% overshoot, MQTT silence, etc).
+
+        Layered defence:
+          A. Device cyclic_quantitative_irrigation @ exact target
+             (primary close, ±2.5% accurate)
+          B. Device cyclic_timed_irrigation @ adaptive duration backstop
+             (refreshed every HW_TIME_BACKSTOP_REFRESH_INTERVAL_SECONDS)
+          C. Device auto_close_when_water_shortage (30 min device-level cap)
+          D. Software 140% overshoot guardrail (force OFF + panic if no close)
+          E. Software MQTT silence guardrail (existing)
+          F. Software stuck-flow guardrail (existing)
+          G. Panic system (events fire if all of the above fail)
+        """
         v = self.valves.get(topic)
         if not v:
             return
@@ -611,9 +776,7 @@ class ValveManager:
         v.session_end_ts = None
         v.trigger_type = "volume"
 
-        # v3.1 — Reset shutoff/guardrail tracking (in case a previous shutoff
-        # left dangling state), and pre-compute the expected duration for
-        # Layer 4 from historical flow data.
+        # Reset shutoff/guardrail tracking from any previous run.
         v.shutoff_in_progress = False
         v.shutoff_reason = ""
         v.shutoff_attempt = 0
@@ -626,14 +789,238 @@ class ValveManager:
             v.shutoff_cancel_handle = None
         v.expected_duration_min = None
         v.expected_duration_warned = False
+        v.software_overshoot_fired = False
+        v.software_overshoot_fired_ts = 0.0
+
+        # Cancel any existing hardware backstop refresh task.
+        if v.hw_backstop_refresh_cancel:
+            try:
+                v.hw_backstop_refresh_cancel()
+            except Exception:
+                pass
+            v.hw_backstop_refresh_cancel = None
+        v.hw_time_backstop_seconds = None
+
         self._schedule_task(self._compute_expected_duration(v, v.target_liters))
 
-        _LOGGER.info("Starting volume run: %s for %.2f L (HA monitoring)", topic, liters)
+        _LOGGER.info(
+            "🚿 Starting volume run: %s for %.2f L (hardware-primary, with adaptive time backstop)",
+            topic, v.target_liters,
+        )
 
-        # NOTE: Sonoff SWV clears cyclic_quantitative_irrigation immediately after starting
-        # Z2M logs show: device accepts command, starts valve, then clears irrigation_capacity to 0
-        # Therefore we use simple ON/OFF and HA monitors flow to turn off at target
-        self.hass.async_create_task(self.async_turn_on(topic))
+        # Hand off to the async dispatch path so we can:
+        #   1. Query historical avg flow to compute the initial time backstop
+        #   2. Publish the dual cyclic_quantitative_irrigation +
+        #      cyclic_timed_irrigation MQTT message
+        #   3. Schedule the adaptive refresh loop
+        self._schedule_task(self._dispatch_start_liters(v))
+
+    async def _dispatch_start_liters(self, v: "Valve") -> None:
+        """Compute initial backstop, publish dual-mode command, schedule refresh."""
+        target = v.target_liters
+        if not target or target <= 0:
+            _LOGGER.error("start_liters called with invalid target for %s", v.topic)
+            return
+
+        # Compute the initial time backstop from historical avg flow.
+        backstop_seconds = await self._compute_time_backstop_seconds(v, target)
+        v.hw_time_backstop_seconds = backstop_seconds
+
+        # Publish the dual-mode MQTT command.
+        payload = {
+            "cyclic_quantitative_irrigation": {
+                "current_count": 0,
+                "total_number": 1,
+                "irrigation_capacity": int(round(target)),
+                "irrigation_interval": 0,
+            },
+            "cyclic_timed_irrigation": {
+                "current_count": 0,
+                "total_number": 1,
+                "irrigation_duration": int(backstop_seconds),
+                "irrigation_interval": 0,
+            },
+        }
+        try:
+            await mqtt.async_publish(
+                self.hass,
+                f"{self.base}/{v.topic}/set",
+                json.dumps(payload),
+                qos=1,
+            )
+            _LOGGER.info(
+                "📤 Published dual-mode start for %s: quantitative=%.0fL, "
+                "time backstop=%ds (%.1f min)",
+                v.topic, target, backstop_seconds, backstop_seconds / 60,
+            )
+        except Exception as e:
+            _LOGGER.error(
+                "Failed to publish dual-mode start for %s: %s", v.topic, e,
+            )
+            return
+
+        # Schedule the first adaptive refresh.
+        self._schedule_hw_backstop_refresh(v)
+
+    async def _compute_time_backstop_seconds(self, v: "Valve",
+                                              target_liters: float) -> int:
+        """Calculate the time backstop in seconds for a volume run.
+
+        Strategy:
+          1. Query historical avg flow for this valve.
+          2. expected_seconds = (target / historical_avg_flow) * 60
+          3. backstop = expected_seconds * HW_TIME_BACKSTOP_OVERSHOOT_RATIO
+          4. Clamp to [HW_TIME_BACKSTOP_MIN_SECONDS,
+                      HW_TIME_BACKSTOP_MAX_SECONDS]
+
+        If no historical data is available, falls back to
+        HW_TIME_BACKSTOP_DEFAULT_FLOW_LPM.
+        """
+        try:
+            avg_flow = await self.db.get_recent_avg_flow(
+                v.topic, lookback=HISTORICAL_FLOW_LOOKBACK_SESSIONS
+            )
+        except Exception as e:
+            _LOGGER.debug(
+                "Could not query historical flow for %s: %s", v.topic, e,
+            )
+            avg_flow = None
+
+        if not avg_flow or avg_flow <= 0:
+            avg_flow = HW_TIME_BACKSTOP_DEFAULT_FLOW_LPM
+            _LOGGER.debug(
+                "No historical flow for %s, using default %.2f L/min for "
+                "time backstop calculation",
+                v.topic, avg_flow,
+            )
+
+        expected_seconds = (target_liters / avg_flow) * 60.0
+        backstop_seconds = expected_seconds * HW_TIME_BACKSTOP_OVERSHOOT_RATIO
+        # Clamp to safe bounds.
+        backstop_seconds = max(
+            HW_TIME_BACKSTOP_MIN_SECONDS,
+            min(HW_TIME_BACKSTOP_MAX_SECONDS, backstop_seconds),
+        )
+        backstop_seconds = int(round(backstop_seconds))
+        _LOGGER.debug(
+            "Time backstop for %s: target=%.0fL, avg_flow=%.2fL/min, "
+            "expected=%.0fs, backstop=%ds",
+            v.topic, target_liters, avg_flow,
+            expected_seconds, backstop_seconds,
+        )
+        return backstop_seconds
+
+    def _schedule_hw_backstop_refresh(self, v: "Valve") -> None:
+        """Schedule the next adaptive backstop refresh in N seconds."""
+        async def _refresh(_now):
+            await self._adaptive_hw_backstop_refresh(v)
+
+        # Cancel any existing handle first to avoid double-scheduling.
+        if v.hw_backstop_refresh_cancel:
+            try:
+                v.hw_backstop_refresh_cancel()
+            except Exception:
+                pass
+        v.hw_backstop_refresh_cancel = async_call_later(
+            self.hass, HW_TIME_BACKSTOP_REFRESH_INTERVAL_SECONDS, _refresh,
+        )
+
+    async def _adaptive_hw_backstop_refresh(self, v: "Valve") -> None:
+        """Recalculate the hardware time backstop based on current observed
+        flow and remaining liters, and republish if it would tighten.
+
+        The hardware timer always counts from receipt of each new SET, so
+        each refresh effectively says "if HA dies in the next N seconds,
+        device should auto-close". As the run progresses and we have more
+        accurate flow data, the backstop window tightens.
+
+        Safety: the new backstop must always be at least
+        (HW_TIME_BACKSTOP_REFRESH_INTERVAL_SECONDS +
+         HW_TIME_BACKSTOP_REFRESH_SAFETY_PADDING_SECONDS) seconds, so a
+        single missed refresh due to MQTT/network lag doesn't cause early
+        device closure.
+        """
+        v.hw_backstop_refresh_cancel = None  # consumed
+
+        # Skip if session is no longer active or shutoff is in progress.
+        if not v.session_active or v.shutoff_in_progress:
+            return
+        if not v.target_liters or v.target_liters <= 0:
+            return
+
+        remaining_liters = v.target_liters - v.session_liters
+        if remaining_liters <= 0:
+            # Already past target — software guardrail will handle.
+            return
+
+        # Use current observed flow if available; otherwise leave the
+        # existing backstop in place and just reschedule.
+        current_flow = v.flow_lpm
+        if current_flow and current_flow > 0:
+            new_backstop_seconds = (
+                (remaining_liters / current_flow)
+                * 60.0 * HW_TIME_BACKSTOP_OVERSHOOT_RATIO
+            )
+        else:
+            # No flow data — keep existing backstop, just reschedule.
+            _LOGGER.debug(
+                "Adaptive refresh skipped for %s — no current flow reading",
+                v.topic,
+            )
+            self._schedule_hw_backstop_refresh(v)
+            return
+
+        # Apply safety floor.
+        min_safe = (
+            HW_TIME_BACKSTOP_REFRESH_INTERVAL_SECONDS
+            + HW_TIME_BACKSTOP_REFRESH_SAFETY_PADDING_SECONDS
+        )
+        new_backstop_seconds = max(min_safe, new_backstop_seconds)
+        new_backstop_seconds = int(round(new_backstop_seconds))
+
+        # Only republish if the new value is meaningfully tighter than what
+        # we last set (or it's the first refresh).
+        old_backstop = v.hw_time_backstop_seconds or HW_TIME_BACKSTOP_MAX_SECONDS
+        if new_backstop_seconds >= old_backstop:
+            _LOGGER.debug(
+                "Adaptive refresh for %s: new=%ds >= old=%ds, no narrowing, "
+                "skipping republish",
+                v.topic, new_backstop_seconds, old_backstop,
+            )
+            self._schedule_hw_backstop_refresh(v)
+            return
+
+        # Publish only the cyclic_timed_irrigation field. The device's volume
+        # target stays in place from the original dual-mode command.
+        payload = {
+            "cyclic_timed_irrigation": {
+                "current_count": 0,
+                "total_number": 1,
+                "irrigation_duration": new_backstop_seconds,
+                "irrigation_interval": 0,
+            },
+        }
+        try:
+            await mqtt.async_publish(
+                self.hass,
+                f"{self.base}/{v.topic}/set",
+                json.dumps(payload),
+                qos=1,
+            )
+            v.hw_time_backstop_seconds = new_backstop_seconds
+            _LOGGER.info(
+                "🔄 Adaptive backstop refresh for %s: %ds → %ds "
+                "(remaining=%.1fL @ %.2fL/min)",
+                v.topic, old_backstop, new_backstop_seconds,
+                remaining_liters, current_flow,
+            )
+        except Exception as e:
+            _LOGGER.error(
+                "Adaptive backstop refresh failed for %s: %s", v.topic, e,
+            )
+
+        # Schedule the next refresh.
+        self._schedule_hw_backstop_refresh(v)
 
     def start_timed(self, topic: str, minutes: float) -> None:
         """Start valve for specified minutes using native cyclic_timed_irrigation"""
@@ -804,6 +1191,17 @@ class ValveManager:
                 ),
                 notification_id=f"z2m_irrigation_shutoff_{v.topic}",
             )
+            # v3.2 — Trip the panic system. The OFF retry chain has been
+            # exhausted and the device is still ON. This is the catastrophic
+            # case the panic system is designed for: an external automation
+            # can hook EVENT_PANIC_REQUIRED or watch
+            # binary_sensor.z2m_irrigation_panic to kill the upstream water
+            # pump.
+            self._trigger_panic(
+                reason=f"shutoff_retry_exhausted:{v.topic}",
+                affected_valves=[v.topic],
+            )
+
             # Clear the in-progress flag so future shutoffs can be initiated.
             # We do NOT clear target_liters / session_liters — the next MQTT
             # message (if any) will integrate normally and the at-target
@@ -820,6 +1218,178 @@ class ValveManager:
             await self._attempt_shutoff(v)
 
         v.shutoff_cancel_handle = async_call_later(self.hass, delay, _retry)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # v3.2 — Panic system
+    #
+    # When the integration's normal failsafe mechanisms (hardware close,
+    # software shutoff retry chain, guardrails) have all failed and water
+    # may still be flowing, fire panic events that an external automation
+    # can use to kill an upstream device (e.g. main water pump).
+    #
+    # The integration itself does NOT directly control any upstream device.
+    # In v4.0 we will add a config field to specify an entity to turn off
+    # automatically; until then, the user wires an HA automation against
+    # binary_sensor.z2m_irrigation_panic or EVENT_PANIC_REQUIRED.
+    #
+    # State:
+    #   - Held in self.panic (a PanicState dataclass instance)
+    #   - Mirrored on binary_sensor.z2m_irrigation_panic (registered by
+    #     binary_sensor.py — see PanicSensor)
+    #   - Manually cleared via the z2m_irrigation.clear_panic service
+    #   - Survives HA restart via the binary_sensor's restore_state
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _trigger_panic(self, reason: str, affected_valves: list) -> None:
+        """Enter panic state. Idempotent — second call with the same panic
+        already active is a no-op aside from updating affected_valves.
+
+        Fires EVENT_PANIC_REQUIRED, creates a CRITICAL persistent
+        notification, updates the panic binary_sensor.
+        """
+        from datetime import datetime as _dt
+        if self.panic.active:
+            # Merge in new affected valves; don't re-fire the event.
+            for vt in affected_valves:
+                if vt not in self.panic.affected_valves:
+                    self.panic.affected_valves.append(vt)
+            _LOGGER.warning(
+                "🚨 Panic already active; merged affected valves. Now: %s",
+                self.panic.affected_valves,
+            )
+            self._dispatch_signal("z2m_irrigation_panic_state_changed")
+            return
+
+        self.panic.active = True
+        self.panic.reason = reason
+        self.panic.triggered_at = time.monotonic()
+        self.panic.triggered_at_iso = _dt.utcnow().isoformat() + "Z"
+        self.panic.affected_valves = list(affected_valves)
+
+        _LOGGER.error(
+            "🚨🚨🚨 PANIC TRIGGERED: %s | affected valves: %s",
+            reason, affected_valves,
+        )
+
+        self._fire_event(
+            EVENT_PANIC_REQUIRED,
+            {
+                "reason": reason,
+                "affected_valves": list(affected_valves),
+                "triggered_at": self.panic.triggered_at_iso,
+            },
+        )
+
+        names = ", ".join(affected_valves) or "(none specified)"
+        self._create_persistent_notification(
+            title="🚨🚨🚨 z2m_irrigation: PANIC — kill the water pump",
+            message=(
+                f"The irrigation integration has entered a **PANIC** state, "
+                f"meaning all software/hardware failsafes have been exhausted "
+                f"and water may still be flowing.\n\n"
+                f"**Reason:** `{reason}`\n"
+                f"**Affected valves:** {names}\n\n"
+                f"Recommended action: **kill power to the water pump** "
+                f"immediately, then physically inspect the affected valves.\n\n"
+                f"To clear panic state once the situation is resolved, call "
+                f"the `z2m_irrigation.clear_panic` service or use the bell "
+                f"icon button."
+            ),
+            notification_id="z2m_irrigation_panic",
+        )
+
+        # Notify the binary sensor (if loaded yet) to update its state.
+        self._dispatch_signal("z2m_irrigation_panic_state_changed")
+
+    def clear_panic(self, cleared_by: str = "manual") -> None:
+        """Clear the panic state. Called by the
+        z2m_irrigation.clear_panic service or by external automations.
+
+        Fires EVENT_PANIC_CLEARED. Does NOT validate that the panic
+        condition has actually resolved — it's the user's job to verify
+        before clearing.
+        """
+        if not self.panic.active:
+            _LOGGER.debug("clear_panic called but no panic active")
+            return
+
+        elapsed = time.monotonic() - self.panic.triggered_at if self.panic.triggered_at > 0 else 0.0
+        _LOGGER.warning(
+            "✅ Panic cleared (was active for %.0fs, reason was: %s, cleared_by=%s)",
+            elapsed, self.panic.reason, cleared_by,
+        )
+
+        self._fire_event(
+            EVENT_PANIC_CLEARED,
+            {
+                "reason": self.panic.reason,
+                "elapsed_seconds": round(elapsed, 1),
+                "affected_valves": list(self.panic.affected_valves),
+                "cleared_by": cleared_by,
+            },
+        )
+
+        self.panic.active = False
+        self.panic.reason = ""
+        self.panic.triggered_at = 0.0
+        self.panic.triggered_at_iso = ""
+        self.panic.affected_valves = []
+
+        # Best-effort dismiss the persistent notification.
+        try:
+            self.hass.loop.call_soon_threadsafe(
+                lambda: self.hass.async_create_task(
+                    self.hass.services.async_call(
+                        "persistent_notification", "dismiss",
+                        {"notification_id": "z2m_irrigation_panic"},
+                        blocking=False,
+                    )
+                )
+            )
+        except Exception:
+            pass
+
+        self._dispatch_signal("z2m_irrigation_panic_state_changed")
+
+    def _check_panic_conditions(self, now: float) -> None:
+        """Called periodically by _guardrail_tick. Evaluates the panic trip
+        conditions and fires _trigger_panic() if any are met.
+
+        Trip conditions:
+          1. (handled in _attempt_shutoff GAVE UP path, not here)
+          2. Two or more valves simultaneously in shutoff_in_progress state
+             AND each has been retrying for at least 60s
+          3. Software 140% overshoot fired AND device still ON after
+             GUARDRAIL_SOFTWARE_OVERSHOOT_GRACE_SECONDS
+        """
+        if self.panic.active:
+            return  # already in panic; no need to re-check
+
+        # Trip condition 2: multiple valves in shutoff retry simultaneously
+        retrying = [
+            v for v in self.valves.values()
+            if v.shutoff_in_progress and (now - v.shutoff_started_ts) > 60
+        ]
+        if len(retrying) >= PANIC_MULTIPLE_VALVES_THRESHOLD:
+            self._trigger_panic(
+                reason=f"multiple_valves_in_retry:{len(retrying)}",
+                affected_valves=[v.topic for v in retrying],
+            )
+            return
+
+        # Trip condition 3: software 140% overshoot fired and grace expired
+        for v in self.valves.values():
+            if (
+                v.software_overshoot_fired
+                and v.state == "ON"
+                and (now - v.software_overshoot_fired_ts)
+                    > GUARDRAIL_SOFTWARE_OVERSHOOT_GRACE_SECONDS
+            ):
+                self._trigger_panic(
+                    reason=f"software_overshoot_grace_expired:{v.topic}",
+                    affected_valves=[v.topic],
+                )
+                return
 
     def _create_persistent_notification(self, title: str, message: str,
                                          notification_id: str) -> None:
@@ -862,8 +1432,20 @@ class ValveManager:
         Iterates over every valve and runs the soft guardrail checks. Any
         guardrail that fires triggers _initiate_shutoff(); the retry chain
         and event firing happen there.
+
+        Also runs the v3.2 panic-condition checks (multiple valves in retry,
+        software overshoot grace expired).
         """
         mono = time.monotonic()
+
+        # v3.2 — Panic condition check happens FIRST so that if any condition
+        # is met, panic state is set before guardrails potentially trigger
+        # additional shutoffs.
+        try:
+            self._check_panic_conditions(mono)
+        except Exception as e:
+            _LOGGER.error("Panic check failed: %s", e, exc_info=True)
+
         for topic, v in list(self.valves.items()):
             try:
                 # Skip valves that are not actively running, or where a
