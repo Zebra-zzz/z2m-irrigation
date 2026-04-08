@@ -2,6 +2,120 @@
 
 All notable changes to the Z2M Irrigation integration will be documented in this file.
 
+## [3.2.1] - 2026-04-08
+
+### 🐛 Hotfix — drop the dual-mode hardware backstop, simplify to single-mode
+### 🐛 Hotfix — flip `auto_close_when_water_shortage` from ENABLE to DISABLE
+
+The v3.2 happy-path test on a real device immediately after deploy revealed
+two issues, both of which v3.2.1 fixes.
+
+#### Issue 1 — `auto_close_when_water_shortage = ENABLE` breaks `cyclic_quantitative_irrigation`
+
+When v3.2 first sees a valve, it pushes `auto_close_when_water_shortage =
+ENABLE` to the device. v3.2 reasoning: it's a free hardware-level safety
+net (device closes itself after 30 min of detected water shortage).
+
+In testing on 2026-04-08:
+
+- With `auto_close_when_water_shortage = DISABLE` (the default), the
+  device's `cyclic_quantitative_irrigation` works correctly: send a target
+  of N liters, device closes itself within ~2.5% of N liters.
+- With `auto_close_when_water_shortage = ENABLE`, sending an
+  `cyclic_quantitative_irrigation` command appears to be silently
+  rejected: the device receives the command, the JSON shows the value,
+  but the device's internal volume counter is left at zero. The valve
+  opens but never closes on its own. (Likely a Sonoff firmware quirk
+  where the two features compete.)
+
+**Fix**: change the initial value to `DISABLE`. The integration actively
+sets `DISABLE` on every newly-discovered valve at startup, undoing any
+damage from a previous v3.2 install on the same device.
+
+The "free 30-min water shortage safety net" is sacrificed for working
+volume control. The integration's existing software guardrails (Layer 2
+stuck-flow, Layer 3 MQTT silence, Layer 4 expected-duration warning,
+v3.2 software 140% overshoot) collectively cover the failure modes that
+the device-level feature would have caught.
+
+#### Issue 2 — `cyclic_quantitative_irrigation` and `cyclic_timed_irrigation` are mutually exclusive
+
+v3.2 published BOTH `cyclic_quantitative_irrigation` AND
+`cyclic_timed_irrigation` in the same MQTT payload, expecting the device
+to honor both simultaneously and "first to fire wins". An earlier dual-mode
+test (50L volume + 30s time) confirmed the time backstop fired correctly,
+which made it look like the design was sound.
+
+Re-testing on 2026-04-08 with auto_close DISABLED revealed the truth:
+
+- Combined payload (both fields in one JSON) → quantitative target
+  silently dropped, only the time target is honored
+- Sequential publishes (quantitative first, then time 2 seconds later)
+  → same result, only the time target is honored
+- Solo `cyclic_quantitative_irrigation` (no time at all) → works fine
+
+**Conclusion**: the device's two cyclic modes are mutually exclusive on
+this firmware. Setting one clears the other, regardless of payload
+batching. The earlier 50L+30s test that "worked" actually only worked
+because the time backstop fired first and we couldn't distinguish that
+from "volume mode is also working".
+
+**Fix**: remove the dual-mode design entirely. v3.2.1 publishes ONLY
+`cyclic_quantitative_irrigation` from `start_liters()` and ONLY
+`cyclic_timed_irrigation` from `start_timed()` (which was already its
+behavior).
+
+#### Removed in v3.2.1
+
+- `_dispatch_start_liters()` — replaced by inline single-mode publish
+- `_compute_time_backstop_seconds()` — no longer needed
+- `_schedule_hw_backstop_refresh()` — no longer needed
+- `_adaptive_hw_backstop_refresh()` — no longer needed
+- `Valve.hw_time_backstop_seconds` field
+- `Valve.hw_backstop_refresh_cancel` field
+- Constants: `HW_TIME_BACKSTOP_OVERSHOOT_RATIO`,
+  `HW_TIME_BACKSTOP_MIN_SECONDS`, `HW_TIME_BACKSTOP_MAX_SECONDS`,
+  `HW_TIME_BACKSTOP_DEFAULT_FLOW_LPM`,
+  `HW_TIME_BACKSTOP_REFRESH_INTERVAL_SECONDS`,
+  `HW_TIME_BACKSTOP_REFRESH_SAFETY_PADDING_SECONDS`
+
+#### Retained from v3.2 (still useful)
+
+- ✅ Software 140% overshoot guardrail in `_on_state`
+- ✅ Panic system: `_trigger_panic`, `_check_panic_conditions`,
+  `clear_panic` service, `binary_sensor.z2m_irrigation_panic` with
+  `restore_state`, `EVENT_PANIC_REQUIRED` / `EVENT_PANIC_CLEARED` events
+- ✅ `current_device_status` monitoring + `EVENT_DEVICE_STATUS_CHANGED`
+- ✅ Initial valve setup pushes `auto_close_when_water_shortage` (now
+  set to `DISABLE` instead of `ENABLE`)
+
+#### Net effect on safety
+
+The morning's runaway scenario (Front Garden + Back Garden hit 956L
+against a 324L target) was caused by the v3.1.x thread-safety bug, NOT by
+the absence of a hardware time backstop. v3.1.2 fixed the thread-safety
+bug. v3.2's hardware-quantitative-as-primary works correctly on its own
+without the time backstop. So this simplification doesn't reduce real
+safety — it just removes a complex and broken feature that was masking
+the simpler working approach.
+
+The Lilly Pilly "stuck flow sensor" failure mode is now caught by the
+software stuck-flow guardrail (Layer 2, fires after 10 min of zero liter
+progress), not by a hardware time backstop. That's the intended trade-off.
+
+#### Files changed
+
+- `custom_components/z2m_irrigation/manager.py` — strip helpers (~280 lines removed),
+  simplify `start_liters` to single inline publish (~30 lines)
+- `custom_components/z2m_irrigation/const.py` — remove HW_TIME_BACKSTOP_*
+  constants, flip `INITIAL_VALVE_AUTO_CLOSE_WHEN_WATER_SHORTAGE` to `DISABLE`,
+  update comments
+- `custom_components/z2m_irrigation/manifest.json` — bump to `3.2.1`
+
+No DB schema changes. Backward compatible. Installs cleanly over v3.2.0.
+
+---
+
 ## [3.2.0] - 2026-04-08
 
 ### 🏗️ Architectural shift — hardware-primary control
