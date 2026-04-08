@@ -33,13 +33,7 @@ from .const import (
     EVENT_SHUTOFF_CONFIRMED,
     EVENT_SHUTOFF_FAILED,
     EVENT_ORPHANED_SESSION_RECOVERED,
-    # v3.2 — Hardware-primary control
-    HW_TIME_BACKSTOP_OVERSHOOT_RATIO,
-    HW_TIME_BACKSTOP_MIN_SECONDS,
-    HW_TIME_BACKSTOP_MAX_SECONDS,
-    HW_TIME_BACKSTOP_DEFAULT_FLOW_LPM,
-    HW_TIME_BACKSTOP_REFRESH_INTERVAL_SECONDS,
-    HW_TIME_BACKSTOP_REFRESH_SAFETY_PADDING_SECONDS,
+    # v3.2 — Hardware-primary control + software safety
     GUARDRAIL_SOFTWARE_OVERSHOOT_RATIO,
     GUARDRAIL_SOFTWARE_OVERSHOOT_GRACE_SECONDS,
     PANIC_MULTIPLE_VALVES_THRESHOLD,
@@ -116,17 +110,8 @@ class Valve:
     recovered_from_orphan: bool = False
 
     # ───────────────────────────────────────────────────────────────────
-    # v3.2 — Hardware-primary control state
+    # v3.2 — Hardware-primary control state + software safety
     # ───────────────────────────────────────────────────────────────────
-
-    # The current device-side cyclic_timed_irrigation duration we set, in
-    # seconds. Used to track whether the next adaptive refresh would
-    # actually narrow the timer (skip refresh if no improvement).
-    hw_time_backstop_seconds: Optional[int] = None
-
-    # Cancel handle for the periodic adaptive refresh task. Cleared when
-    # the session ends or shutoff completes.
-    hw_backstop_refresh_cancel: Optional[Callable[[], None]] = None
 
     # Tracks whether the software 140% overshoot guardrail has fired for
     # this session. After firing, we wait
@@ -565,17 +550,7 @@ class ValveManager:
                     v.shutoff_attempt = 0
                     v.shutoff_started_ts = 0.0
 
-                # v3.2 — Cancel adaptive hardware backstop refresh task and
-                # clear the software overshoot tracking, since the session
-                # has ended (whether by hardware close, software shutoff, or
-                # manual intervention).
-                if v.hw_backstop_refresh_cancel:
-                    try:
-                        v.hw_backstop_refresh_cancel()
-                    except Exception:
-                        pass
-                    v.hw_backstop_refresh_cancel = None
-                v.hw_time_backstop_seconds = None
+                # v3.2 — Clear the software overshoot tracking on session end.
                 v.software_overshoot_fired = False
                 v.software_overshoot_fired_ts = 0.0
                 if v.session_active:
@@ -745,29 +720,36 @@ class ValveManager:
     def start_liters(self, topic: str, liters: float) -> None:
         """Start a volume-targeted irrigation run.
 
-        v3.2 — Hardware-primary architecture. The Sonoff SWV's
-        `cyclic_quantitative_irrigation` is the **primary** control mechanism;
-        the device measures its own flow and closes itself when the target
-        is reached (verified ~2.5% accurate via bucket test on 2026-04-08).
+        v3.2.1 — Hardware-primary architecture, simplified.
 
-        We ALSO publish a `cyclic_timed_irrigation` time backstop in the same
-        payload — the device honors both simultaneously and whichever fires
-        first wins (verified by dual-mode test on 2026-04-08).
+        Sends ONLY `cyclic_quantitative_irrigation` to the device. The
+        Sonoff SWV's hardware quantitative counter is the primary close
+        mechanism (verified ~2.5% accurate via bucket test on 2026-04-08).
+
+        v3.2 originally tried to ALSO send a `cyclic_timed_irrigation`
+        backstop in the same call, but testing on 2026-04-08 showed that
+        the two cyclic modes are mutually exclusive on this firmware:
+        whichever is set last clears the other. So v3.2.1 uses pure
+        single-mode publishes — `start_liters` uses quantitative-only,
+        `start_timed` uses timed-only.
 
         Software still tracks `session_used` for stats/UI but is NOT the
-        primary control mechanism. Software guardrails remain as additional
-        defence-in-depth (140% overshoot, MQTT silence, etc).
+        primary control mechanism. The integration's existing software
+        guardrails (Layer 1-4 from v3.1.x plus the v3.2 software 140%
+        overshoot) remain as defence-in-depth, with the v3.2 panic system
+        firing pump-kill events if all guardrails fail.
 
         Layered defence:
           A. Device cyclic_quantitative_irrigation @ exact target
              (primary close, ±2.5% accurate)
-          B. Device cyclic_timed_irrigation @ adaptive duration backstop
-             (refreshed every HW_TIME_BACKSTOP_REFRESH_INTERVAL_SECONDS)
-          C. Device auto_close_when_water_shortage (30 min device-level cap)
-          D. Software 140% overshoot guardrail (force OFF + panic if no close)
-          E. Software MQTT silence guardrail (existing)
-          F. Software stuck-flow guardrail (existing)
-          G. Panic system (events fire if all of the above fail)
+          B. Software 140% overshoot guardrail (in _on_state) — force OFF
+             if integrated session_liters reaches 1.4 × target
+          C. Software stuck-flow guardrail (in _guardrail_tick) — force
+             OFF if no liter progress for 10 min while session active
+          D. Software MQTT silence guardrail (in _guardrail_tick) — force
+             OFF if no MQTT message from device for 5 min
+          E. Panic system — fires EVENT_PANIC_REQUIRED + persistent
+             notification if any of the above shutoff retries exhaust
         """
         v = self.valves.get(topic)
         if not v:
@@ -792,235 +774,35 @@ class ValveManager:
         v.software_overshoot_fired = False
         v.software_overshoot_fired_ts = 0.0
 
-        # Cancel any existing hardware backstop refresh task.
-        if v.hw_backstop_refresh_cancel:
-            try:
-                v.hw_backstop_refresh_cancel()
-            except Exception:
-                pass
-            v.hw_backstop_refresh_cancel = None
-        v.hw_time_backstop_seconds = None
-
         self._schedule_task(self._compute_expected_duration(v, v.target_liters))
 
         _LOGGER.info(
-            "🚿 Starting volume run: %s for %.2f L (hardware-primary, with adaptive time backstop)",
+            "🚿 Starting volume run: %s for %.2f L (cyclic_quantitative_irrigation)",
             topic, v.target_liters,
         )
 
-        # Hand off to the async dispatch path so we can:
-        #   1. Query historical avg flow to compute the initial time backstop
-        #   2. Publish the dual cyclic_quantitative_irrigation +
-        #      cyclic_timed_irrigation MQTT message
-        #   3. Schedule the adaptive refresh loop
-        self._schedule_task(self._dispatch_start_liters(v))
-
-    async def _dispatch_start_liters(self, v: "Valve") -> None:
-        """Compute initial backstop, publish dual-mode command, schedule refresh."""
-        target = v.target_liters
-        if not target or target <= 0:
-            _LOGGER.error("start_liters called with invalid target for %s", v.topic)
-            return
-
-        # Compute the initial time backstop from historical avg flow.
-        backstop_seconds = await self._compute_time_backstop_seconds(v, target)
-        v.hw_time_backstop_seconds = backstop_seconds
-
-        # Publish the dual-mode MQTT command.
+        # Publish the cyclic_quantitative_irrigation command. The device
+        # measures its own flow and closes itself at the target.
         payload = {
             "cyclic_quantitative_irrigation": {
                 "current_count": 0,
                 "total_number": 1,
-                "irrigation_capacity": int(round(target)),
-                "irrigation_interval": 0,
-            },
-            "cyclic_timed_irrigation": {
-                "current_count": 0,
-                "total_number": 1,
-                "irrigation_duration": int(backstop_seconds),
+                "irrigation_capacity": int(round(v.target_liters)),
                 "irrigation_interval": 0,
             },
         }
-        try:
-            await mqtt.async_publish(
+        self.hass.async_create_task(
+            mqtt.async_publish(
                 self.hass,
-                f"{self.base}/{v.topic}/set",
+                f"{self.base}/{topic}/set",
                 json.dumps(payload),
                 qos=1,
             )
-            _LOGGER.info(
-                "📤 Published dual-mode start for %s: quantitative=%.0fL, "
-                "time backstop=%ds (%.1f min)",
-                v.topic, target, backstop_seconds, backstop_seconds / 60,
-            )
-        except Exception as e:
-            _LOGGER.error(
-                "Failed to publish dual-mode start for %s: %s", v.topic, e,
-            )
-            return
-
-        # Schedule the first adaptive refresh.
-        self._schedule_hw_backstop_refresh(v)
-
-    async def _compute_time_backstop_seconds(self, v: "Valve",
-                                              target_liters: float) -> int:
-        """Calculate the time backstop in seconds for a volume run.
-
-        Strategy:
-          1. Query historical avg flow for this valve.
-          2. expected_seconds = (target / historical_avg_flow) * 60
-          3. backstop = expected_seconds * HW_TIME_BACKSTOP_OVERSHOOT_RATIO
-          4. Clamp to [HW_TIME_BACKSTOP_MIN_SECONDS,
-                      HW_TIME_BACKSTOP_MAX_SECONDS]
-
-        If no historical data is available, falls back to
-        HW_TIME_BACKSTOP_DEFAULT_FLOW_LPM.
-        """
-        try:
-            avg_flow = await self.db.get_recent_avg_flow(
-                v.topic, lookback=HISTORICAL_FLOW_LOOKBACK_SESSIONS
-            )
-        except Exception as e:
-            _LOGGER.debug(
-                "Could not query historical flow for %s: %s", v.topic, e,
-            )
-            avg_flow = None
-
-        if not avg_flow or avg_flow <= 0:
-            avg_flow = HW_TIME_BACKSTOP_DEFAULT_FLOW_LPM
-            _LOGGER.debug(
-                "No historical flow for %s, using default %.2f L/min for "
-                "time backstop calculation",
-                v.topic, avg_flow,
-            )
-
-        expected_seconds = (target_liters / avg_flow) * 60.0
-        backstop_seconds = expected_seconds * HW_TIME_BACKSTOP_OVERSHOOT_RATIO
-        # Clamp to safe bounds.
-        backstop_seconds = max(
-            HW_TIME_BACKSTOP_MIN_SECONDS,
-            min(HW_TIME_BACKSTOP_MAX_SECONDS, backstop_seconds),
         )
-        backstop_seconds = int(round(backstop_seconds))
-        _LOGGER.debug(
-            "Time backstop for %s: target=%.0fL, avg_flow=%.2fL/min, "
-            "expected=%.0fs, backstop=%ds",
-            v.topic, target_liters, avg_flow,
-            expected_seconds, backstop_seconds,
+        _LOGGER.info(
+            "📤 Published cyclic_quantitative_irrigation start for %s: %.0fL",
+            topic, v.target_liters,
         )
-        return backstop_seconds
-
-    def _schedule_hw_backstop_refresh(self, v: "Valve") -> None:
-        """Schedule the next adaptive backstop refresh in N seconds."""
-        async def _refresh(_now):
-            await self._adaptive_hw_backstop_refresh(v)
-
-        # Cancel any existing handle first to avoid double-scheduling.
-        if v.hw_backstop_refresh_cancel:
-            try:
-                v.hw_backstop_refresh_cancel()
-            except Exception:
-                pass
-        v.hw_backstop_refresh_cancel = async_call_later(
-            self.hass, HW_TIME_BACKSTOP_REFRESH_INTERVAL_SECONDS, _refresh,
-        )
-
-    async def _adaptive_hw_backstop_refresh(self, v: "Valve") -> None:
-        """Recalculate the hardware time backstop based on current observed
-        flow and remaining liters, and republish if it would tighten.
-
-        The hardware timer always counts from receipt of each new SET, so
-        each refresh effectively says "if HA dies in the next N seconds,
-        device should auto-close". As the run progresses and we have more
-        accurate flow data, the backstop window tightens.
-
-        Safety: the new backstop must always be at least
-        (HW_TIME_BACKSTOP_REFRESH_INTERVAL_SECONDS +
-         HW_TIME_BACKSTOP_REFRESH_SAFETY_PADDING_SECONDS) seconds, so a
-        single missed refresh due to MQTT/network lag doesn't cause early
-        device closure.
-        """
-        v.hw_backstop_refresh_cancel = None  # consumed
-
-        # Skip if session is no longer active or shutoff is in progress.
-        if not v.session_active or v.shutoff_in_progress:
-            return
-        if not v.target_liters or v.target_liters <= 0:
-            return
-
-        remaining_liters = v.target_liters - v.session_liters
-        if remaining_liters <= 0:
-            # Already past target — software guardrail will handle.
-            return
-
-        # Use current observed flow if available; otherwise leave the
-        # existing backstop in place and just reschedule.
-        current_flow = v.flow_lpm
-        if current_flow and current_flow > 0:
-            new_backstop_seconds = (
-                (remaining_liters / current_flow)
-                * 60.0 * HW_TIME_BACKSTOP_OVERSHOOT_RATIO
-            )
-        else:
-            # No flow data — keep existing backstop, just reschedule.
-            _LOGGER.debug(
-                "Adaptive refresh skipped for %s — no current flow reading",
-                v.topic,
-            )
-            self._schedule_hw_backstop_refresh(v)
-            return
-
-        # Apply safety floor.
-        min_safe = (
-            HW_TIME_BACKSTOP_REFRESH_INTERVAL_SECONDS
-            + HW_TIME_BACKSTOP_REFRESH_SAFETY_PADDING_SECONDS
-        )
-        new_backstop_seconds = max(min_safe, new_backstop_seconds)
-        new_backstop_seconds = int(round(new_backstop_seconds))
-
-        # Only republish if the new value is meaningfully tighter than what
-        # we last set (or it's the first refresh).
-        old_backstop = v.hw_time_backstop_seconds or HW_TIME_BACKSTOP_MAX_SECONDS
-        if new_backstop_seconds >= old_backstop:
-            _LOGGER.debug(
-                "Adaptive refresh for %s: new=%ds >= old=%ds, no narrowing, "
-                "skipping republish",
-                v.topic, new_backstop_seconds, old_backstop,
-            )
-            self._schedule_hw_backstop_refresh(v)
-            return
-
-        # Publish only the cyclic_timed_irrigation field. The device's volume
-        # target stays in place from the original dual-mode command.
-        payload = {
-            "cyclic_timed_irrigation": {
-                "current_count": 0,
-                "total_number": 1,
-                "irrigation_duration": new_backstop_seconds,
-                "irrigation_interval": 0,
-            },
-        }
-        try:
-            await mqtt.async_publish(
-                self.hass,
-                f"{self.base}/{v.topic}/set",
-                json.dumps(payload),
-                qos=1,
-            )
-            v.hw_time_backstop_seconds = new_backstop_seconds
-            _LOGGER.info(
-                "🔄 Adaptive backstop refresh for %s: %ds → %ds "
-                "(remaining=%.1fL @ %.2fL/min)",
-                v.topic, old_backstop, new_backstop_seconds,
-                remaining_liters, current_flow,
-            )
-        except Exception as e:
-            _LOGGER.error(
-                "Adaptive backstop refresh failed for %s: %s", v.topic, e,
-            )
-
-        # Schedule the next refresh.
-        self._schedule_hw_backstop_refresh(v)
 
     def start_timed(self, topic: str, minutes: float) -> None:
         """Start valve for specified minutes using native cyclic_timed_irrigation"""

@@ -79,56 +79,31 @@ EVENT_SHUTOFF_FAILED = "z2m_irrigation_shutoff_failed"
 EVENT_ORPHANED_SESSION_RECOVERED = "z2m_irrigation_orphaned_session_recovered"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# v3.2 — Hardware-primary control & adaptive backstop
+# v3.2 — Hardware-primary control
 #
 # Background: extensive testing on 2026-04-08 against the Sonoff SWV revealed:
-#   1. The device's cyclic_quantitative_irrigation hardware counter is highly
-#      accurate (~2.5% vs bucket measurement)
+#   1. The device's cyclic_quantitative_irrigation hardware counter is
+#      highly accurate (~2.5% vs bucket measurement) when used in isolation
 #   2. The device's cyclic_timed_irrigation hardware timer is accurate to ±2s
-#      and a new SET fully replaces the previous timer (countdown restarts
-#      from receipt time)
-#   3. When BOTH cyclic_quantitative_irrigation AND cyclic_timed_irrigation
-#      are set in the same payload, the device honors BOTH simultaneously and
-#      whichever fires first wins (a 50L+30s combined run closed at ~30s)
-#   4. The device exposes its own flow only at 1-decimal m³/h precision,
+#   3. The device exposes its own flow only at 1-decimal m³/h precision,
 #      causing software flow integration to be ±10-40% inaccurate depending
 #      on actual flow rate
 #
 # Conclusion: shift the architecture so that the device's hardware features
 # are the PRIMARY control mechanism, and software is a monitor/backup.
-# See AUDIT-2026-04-08-v3.2.md for the full investigation.
+#
+# v3.2.1 follow-up findings: cyclic_quantitative_irrigation and
+# cyclic_timed_irrigation CANNOT coexist on this firmware. Setting one
+# clears the other (both as a combined payload, AND as sequential MQTT
+# publishes). The two hardware modes are mutually exclusive.
+#
+# Therefore:
+#   * start_liters() uses ONLY cyclic_quantitative_irrigation
+#   * start_timed() uses ONLY cyclic_timed_irrigation (existing v3.1 behavior)
+#   * No "hardware time backstop for volume runs" — software guardrails
+#     1-3 (stuck-flow, MQTT-silence, 140% overshoot) plus the panic system
+#     are the safety nets for a stuck-volume-mode scenario.
 # ─────────────────────────────────────────────────────────────────────────────
-
-# When start_liters() runs, both quantitative and timed are published. Volume
-# target is set to the user's exact request. Time target is calculated as
-# `(target_liters / historical_avg_flow) × HW_TIME_BACKSTOP_OVERSHOOT_RATIO`,
-# subject to a min and max bound.
-HW_TIME_BACKSTOP_OVERSHOOT_RATIO = 1.5  # 150% of expected duration
-
-# Min bound: even very small runs get at least this many seconds of timer
-# (so the device timer doesn't fire prematurely on the first refresh).
-HW_TIME_BACKSTOP_MIN_SECONDS = 600  # 10 minutes
-
-# Max bound: even huge runs cap the time backstop here (so a stuck-flow
-# scenario gets caught within this window even if the historical average
-# was very low).
-HW_TIME_BACKSTOP_MAX_SECONDS = 14400  # 4 hours
-
-# When no historical flow data is available (first ever run on a valve),
-# use this conservative default flow rate for the time backstop calculation.
-HW_TIME_BACKSTOP_DEFAULT_FLOW_LPM = 2.0  # L/min
-
-# Adaptive refresh: every N seconds, recalculate the time backstop based on
-# current observed flow and remaining liters, and republish a tighter timer
-# if appropriate. The hardware timer always counts from receipt of each
-# new SET, so this naturally narrows as the run progresses.
-HW_TIME_BACKSTOP_REFRESH_INTERVAL_SECONDS = 300  # 5 minutes
-
-# Safety floor when refreshing: the new published timer must always be at
-# least (next refresh interval + this padding) seconds in the future, so a
-# single missed refresh due to MQTT/network lag doesn't cause the device to
-# close prematurely.
-HW_TIME_BACKSTOP_REFRESH_SAFETY_PADDING_SECONDS = 120  # 2 minutes
 
 # ─────────────────────────────────────────────────────────────────────────────
 # v3.2 — Software 140% overshoot guardrail
@@ -196,12 +171,21 @@ EVENT_PANIC_CLEARED = "z2m_irrigation_panic_cleared"
 EVENT_DEVICE_STATUS_CHANGED = "z2m_irrigation_device_status_changed"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# v3.2 — Initial valve setup
+# v3.2.1 — Initial valve setup
 #
-# When the integration first sees a valve, push these settings to ensure
-# device-side safety features are enabled:
-#   - auto_close_when_water_shortage = ENABLE
-#     (device closes itself after 30 min of detected water shortage)
+# When the integration first sees a valve, push these settings to align the
+# device with v3.2.1 expectations.
+#
+# auto_close_when_water_shortage = DISABLE
+#   v3.2 originally tried to ENABLE this as a "free 30-min hardware safety
+#   net". v3.2.1 testing on 2026-04-08 revealed that ENABLE breaks
+#   cyclic_quantitative_irrigation: when this flag is on, sending an
+#   irrigation_capacity command silently fails (the volume target is set
+#   in the MQTT payload but the device clears it before counting). With
+#   DISABLE, cyclic_quantitative_irrigation works correctly.
+#
+#   We actively SET DISABLE on every newly-discovered valve to undo any
+#   damage from a previous v3.2 install on the same valve.
 # ─────────────────────────────────────────────────────────────────────────────
 
-INITIAL_VALVE_AUTO_CLOSE_WHEN_WATER_SHORTAGE = "ENABLE"
+INITIAL_VALVE_AUTO_CLOSE_WHEN_WATER_SHORTAGE = "DISABLE"
