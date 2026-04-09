@@ -799,15 +799,14 @@ views:
               ~{{ state_attr('sensor.z2m_irrigation_next_run', 'estimated_total_liters') }} L estimated)
               {% endif %}
 
-              ---
               {% set q = state_attr('sensor.z2m_irrigation_next_run', 'queue') or [] %}
               {% if q | length > 0 %}
-              **Queue (in flight):**
+
+              ---
+              **Queue ({{ q | length }} zone{{ 's' if q | length != 1 else '' }} in flight):**
               {% for item in q %}
               - {{ item.zone }} — {{ item.liters }} L ({{ item.trigger }})
               {% endfor %}
-              {% else %}
-              _Queue is empty._
               {% endif %}
 
       # Section: Schedules — single section with the JS editor card
@@ -1783,35 +1782,140 @@ views:
               {% endfor %}
               {% endif %}
 
-      # Section: Per-zone daily charts (one per discovered valve)
+      # Section: Per-zone daily charts — v4.1 hardcoded per zone
+      #
+      # Each zone gets its own apexcharts-card reading from
+      # `sensor.<zone>_daily_history.attributes.days[]`. Hardcoded
+      # rather than auto-entities (see D2 in tracker for why).
       - type: grid
         cards:
           - type: heading
-            heading: Per-zone trend
+            heading: Per-zone trend (30 days)
             heading_style: title
-          # v4.0 rc-2 hotfix — the previous version used auto-entities to
-          # generate one apexcharts-card per discovered valve via a
-          # `series.entity: this.entity_id` placeholder. Auto-entities
-          # substitutes top-level `entity:` placeholders cleanly but
-          # does NOT reliably walk into nested `series:` arrays, so the
-          # render path crashed with "card vertical-stack Error: Invalid
-          # configuration". The combined daily chart at the top of
-          # this tab + the leaderboard table above cover most of the
-          # value; per-zone trend bars are deferred to v4.1 where I'll
-          # ship a smarter pattern (likely a single multi-series chart
-          # whose series are populated dynamically from
-          # `daily_totals.attributes.zones`).
-          - type: markdown
-            content: |
-              **Per-zone trend bars** are deferred to v4.1.
-
-              Until then, the **30-day delivery** chart at the top of
-              this tab shows the combined trend across all zones, and
-              the **leaderboard table** above shows per-zone totals
-              over the same window. For a per-zone time-series view,
-              open Developer Tools → Statistics and pick any
-              `sensor.<zone>_daily_history` (the `days` attribute
-              carries the same data shape).
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: Front Garden
+            graph_span: 30d
+            span:
+              end: day
+            apex_config:
+              chart:
+                type: bar
+                height: 180
+              plotOptions:
+                bar:
+                  borderRadius: 3
+                  columnWidth: 60%
+              dataLabels:
+                enabled: false
+              legend:
+                show: false
+              xaxis:
+                type: datetime
+            series:
+              - entity: sensor.front_garden_daily_history
+                name: Litres
+                color: "#0d7377"
+                data_generator: |
+                  const days = entity.attributes.days || [];
+                  return days.slice().reverse().map(d => [
+                    new Date(d.date + 'T00:00:00').getTime(),
+                    d.liters
+                  ]);
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: Lilly Pilly
+            graph_span: 30d
+            span:
+              end: day
+            apex_config:
+              chart:
+                type: bar
+                height: 180
+              plotOptions:
+                bar:
+                  borderRadius: 3
+                  columnWidth: 60%
+              dataLabels:
+                enabled: false
+              legend:
+                show: false
+              xaxis:
+                type: datetime
+            series:
+              - entity: sensor.lilly_pilly_daily_history
+                name: Litres
+                color: "#e91e63"
+                data_generator: |
+                  const days = entity.attributes.days || [];
+                  return days.slice().reverse().map(d => [
+                    new Date(d.date + 'T00:00:00').getTime(),
+                    d.liters
+                  ]);
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: Back Garden
+            graph_span: 30d
+            span:
+              end: day
+            apex_config:
+              chart:
+                type: bar
+                height: 180
+              plotOptions:
+                bar:
+                  borderRadius: 3
+                  columnWidth: 60%
+              dataLabels:
+                enabled: false
+              legend:
+                show: false
+              xaxis:
+                type: datetime
+            series:
+              - entity: sensor.back_garden_daily_history
+                name: Litres
+                color: "#4caf50"
+                data_generator: |
+                  const days = entity.attributes.days || [];
+                  return days.slice().reverse().map(d => [
+                    new Date(d.date + 'T00:00:00').getTime(),
+                    d.liters
+                  ]);
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: Mains Taps
+            graph_span: 30d
+            span:
+              end: day
+            apex_config:
+              chart:
+                type: bar
+                height: 180
+              plotOptions:
+                bar:
+                  borderRadius: 3
+                  columnWidth: 60%
+              dataLabels:
+                enabled: false
+              legend:
+                show: false
+              xaxis:
+                type: datetime
+            series:
+              - entity: sensor.mains_taps_daily_history
+                name: Litres
+                color: "#2196f3"
+                data_generator: |
+                  const days = entity.attributes.days || [];
+                  return days.slice().reverse().map(d => [
+                    new Date(d.date + 'T00:00:00').getTime(),
+                    d.liters
+                  ]);
 
       # Section: Schedule timeline — last 14 days of fires/skips
       - type: grid
