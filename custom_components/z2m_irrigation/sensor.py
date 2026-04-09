@@ -683,7 +683,7 @@ class ActiveSessionSummarySensor(_PerValveAwareGlobalSensor):
     def __init__(self, mgr: ValveManager):
         super().__init__(
             mgr, "Z2M Irrigation Active Session",
-            "z2m_irrigation_active_session_summary",
+            "z2m_irrigation_active_session",
         )
 
     def _active_valves(self) -> list[Valve]:
@@ -779,7 +779,7 @@ class NextRunSummarySensor(BaseGlobalSensor):
     def __init__(self, mgr: ValveManager):
         super().__init__(
             mgr, "Z2M Irrigation Next Run",
-            "z2m_irrigation_next_run_summary",
+            "z2m_irrigation_next_run",
         )
 
     def _summary(self) -> Dict[str, Any]:
