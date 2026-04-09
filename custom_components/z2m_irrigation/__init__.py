@@ -112,7 +112,23 @@ SCHEMA_SET_ZONE_SKIP_THRESHOLDS = vol.Schema({
 })
 
 # v4.0-alpha-2 — schedule schemas
-_TIME_RE = vol.Match(r"^\d{1,2}:\d{2}$")
+# v4.0-rc-3 (F-B): accept HH:MM (24-hour local) OR sun-relative formats.
+# Supported sun events (resolved via the HA `sun` integration which
+# uses the system location):
+#   sunrise   → sun.sun.attributes.next_rising
+#   sunset    → sun.sun.attributes.next_setting
+#   dawn      → sun.sun.attributes.next_dawn   (civil twilight start)
+#   dusk      → sun.sun.attributes.next_dusk   (civil twilight end)
+#   noon      → sun.sun.attributes.next_noon   (solar noon)
+#   midnight  → sun.sun.attributes.next_midnight (solar midnight)
+# Each accepts an optional ±N minute offset and optional trailing 'm':
+#   "sunrise"            "sunset+10"
+#   "sunrise-45"         "dawn-15m"
+#   "sunset+15m"         "dusk"
+_TIME_RE = vol.Match(
+    r"^(\d{1,2}:\d{2}|(?:sunrise|sunset|dawn|dusk|noon|midnight)\s*[+-]?\s*\d*\s*m?)$",
+    msg="time must be HH:MM, or one of sunrise/sunset/dawn/dusk/noon/midnight with optional ±N offset (e.g. sunrise-45, dusk+10)",
+)
 _DAY_LIST = vol.All(cv.ensure_list, [vol.In(DAYS_OF_WEEK)])
 _ZONE_LIST = vol.All(cv.ensure_list, [cv.string])
 
@@ -224,12 +240,35 @@ async def _register_frontend_once(hass: HomeAssistant) -> None:
             except Exception as e:
                 _LOGGER.warning("Failed to register static path %s: %s", url, e)
 
+    # v4.0-rc-3 hotfix — append a version query string to the URL we
+    # ask the frontend to load so iOS Safari (which caches `add_extra_js_url`
+    # resources indefinitely without a busting param) fetches a fresh
+    # copy after every integration update. Reading the version from the
+    # manifest at runtime so the cache busts whenever we bump rc-N → rc-N+1.
+    #
+    # The static-path registration above stays unversioned because HA
+    # serves the file by exact path match — query strings are ignored
+    # by the static handler. Only the URL we hand to the browser via
+    # add_extra_js_url() needs the version suffix.
+    cache_bust = ""
+    try:
+        import json as _json
+        manifest_path = Path(__file__).parent / "manifest.json"
+        with open(manifest_path) as f:
+            _m = _json.load(f)
+        cache_bust = "?v=" + str(_m.get("version", "unknown"))
+    except Exception as e:
+        _LOGGER.debug("Could not read manifest version for cache busting: %s", e)
+
     for (url, _fs_path, label) in to_register:
+        url_with_version = url + cache_bust
         try:
-            add_extra_js_url(hass, url)
-            _LOGGER.info("🎨 Registered %s: %s", label, url)
+            add_extra_js_url(hass, url_with_version)
+            _LOGGER.info("🎨 Registered %s: %s", label, url_with_version)
         except Exception as e:
-            _LOGGER.warning("Failed to register extra JS URL %s: %s", url, e)
+            _LOGGER.warning(
+                "Failed to register extra JS URL %s: %s", url_with_version, e,
+            )
 
     _FRONTEND_REGISTERED = True
 

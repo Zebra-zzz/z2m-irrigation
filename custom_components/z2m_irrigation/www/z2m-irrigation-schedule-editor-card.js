@@ -37,8 +37,62 @@ const CARD_VERSION = "4.0.0rc3";
 const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const MODES = [
   { value: "smart", label: "Smart (calculator)" },
-  { value: "fixed", label: "Fixed liters per zone" },
+  { value: "fixed", label: "Fixed litres per zone" },
 ];
+
+// v4.0-rc-3 (F-B UX): all 6 sun events HA's sun integration provides.
+// User picks one from a dropdown; we serialise back to the canonical
+// `event±N` string the backend understands.
+const SUN_EVENTS = [
+  { value: "sunrise",  label: "🌅 Sunrise" },
+  { value: "sunset",   label: "🌇 Sunset" },
+  { value: "dawn",     label: "🌄 Dawn (civil twilight start)" },
+  { value: "dusk",     label: "🌆 Dusk (civil twilight end)" },
+  { value: "noon",     label: "☀️ Solar noon" },
+  { value: "midnight", label: "🌙 Solar midnight" },
+];
+
+// Parse a time string into a UI form representation:
+//   { type: 'fixed',  fixed_time: '06:00' }
+//   { type: 'sun',    sun_event: 'sunrise', sun_direction: 'before', sun_minutes: 45 }
+function parseTimeString(s) {
+  if (!s) return { type: "fixed", fixed_time: "06:00", sun_event: "sunrise", sun_direction: "after", sun_minutes: 0 };
+  const trimmed = s.trim().toLowerCase();
+  // Fixed HH:MM
+  if (/^\d{1,2}:\d{2}$/.test(trimmed)) {
+    return { type: "fixed", fixed_time: s, sun_event: "sunrise", sun_direction: "after", sun_minutes: 0 };
+  }
+  // Sun-relative
+  const m = trimmed.match(/^(sunrise|sunset|dawn|dusk|noon|midnight)\s*([+-]?\s*\d+)?\s*m?$/);
+  if (m) {
+    const event = m[1];
+    const offsetRaw = (m[2] || "0").replace(/\s+/g, "");
+    const offset = parseInt(offsetRaw, 10) || 0;
+    return {
+      type: "sun",
+      fixed_time: "06:00",
+      sun_event: event,
+      sun_direction: offset < 0 ? "before" : "after",
+      sun_minutes: Math.abs(offset),
+    };
+  }
+  // Fallback: treat as fixed
+  return { type: "fixed", fixed_time: s, sun_event: "sunrise", sun_direction: "after", sun_minutes: 0 };
+}
+
+// Inverse: serialise the UI form representation to the canonical string
+// the backend `_TIME_RE` schema expects.
+function serializeTimeString(f) {
+  if (f.type === "fixed") {
+    return f.fixed_time || "06:00";
+  }
+  // sun
+  const event = f.sun_event || "sunrise";
+  const minutes = parseInt(f.sun_minutes, 10) || 0;
+  if (minutes === 0) return event;
+  const sign = (f.sun_direction === "before") ? "-" : "+";
+  return `${event}${sign}${minutes}`;
+}
 
 class Z2MIrrigationScheduleEditorCard extends HTMLElement {
   constructor() {
@@ -108,13 +162,22 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
   // ───────────────────────────────────────────────────────────────────
 
   _resetForm() {
+    const initialTime = this._config.default_time || "06:00";
+    const parsed = parseTimeString(initialTime);
     this._form = {
       // v4.0-rc-3 (F-J): editing_id is null in CREATE mode and set to a
       // schedule_id string in EDIT mode. Submit routes to either
       // create_schedule or update_schedule based on this flag.
       editing_id: null,
       name: "",
-      time: this._config.default_time || "06:00",
+      // v4.0-rc-3 hotfix iter 3 (F-B UX): time is now derived from
+      // four UI fields. The submit handler serialises them via
+      // serializeTimeString() into the canonical backend format.
+      time_type: parsed.type,           // "fixed" | "sun"
+      fixed_time: parsed.fixed_time,    // "HH:MM"
+      sun_event: parsed.sun_event,      // sunrise|sunset|dawn|dusk|noon|midnight
+      sun_direction: parsed.sun_direction, // "before" | "after"
+      sun_minutes: parsed.sun_minutes,  // integer
       days: [],                   // [] = every day
       mode: this._config.default_mode || "smart",
       zones: [],                  // [] in smart = all in_smart_cycle
@@ -143,10 +206,15 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
       this._render();
       return;
     }
+    const parsed = parseTimeString(sched.time || "06:00");
     this._form = {
       editing_id: sched.id,
       name: sched.name || "",
-      time: sched.time || "06:00",
+      time_type: parsed.type,
+      fixed_time: parsed.fixed_time,
+      sun_event: parsed.sun_event,
+      sun_direction: parsed.sun_direction,
+      sun_minutes: parsed.sun_minutes,
       days: Array.isArray(sched.days) ? sched.days.slice() : [],
       mode: sched.mode || "smart",
       zones: Array.isArray(sched.zones) ? sched.zones.slice() : [],
@@ -186,33 +254,39 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
 
   _discoverZones() {
     if (!this._hass || !this._hass.states) return [];
+    // v4.0-rc-3 hotfix iteration 2 — enumerate by `sensor.*_zone_factor`
+    // directly. Previous heuristic walked switch entities and looked
+    // for a parallel `sensor.<base>_zone_factor`, but the user has
+    // BOTH `switch.<zone>` (z2m-exposed) AND `switch.<zone>_valve`
+    // (this integration's) for some zones, while others (like Front
+    // Garden) only have `switch.<zone>_valve`. The previous heuristic
+    // mis-handled the `_valve` suffix and silently dropped zones that
+    // only had the integration's switch — Front Garden disappeared
+    // from the editor's zone chips.
+    //
+    // Enumerating by `sensor.*_zone_factor` is bulletproof: every
+    // valve discovered by the integration registers exactly one of
+    // these sensors via _ensure_valve. The friendly_name on the
+    // sensor is "<Zone Name> Zone Factor"; we strip the suffix to
+    // recover the bare zone name (which IS the valve.friendly_name
+    // and the engine's lookup key — see B2 fix earlier in rc-3).
     const out = [];
+    const seen = new Set();
     for (const [eid, st] of Object.entries(this._hass.states)) {
-      // Heuristic: switch entities whose underlying valve has a
-      // matching `_zone_factor` sensor are integration valves.
-      // The integration always registers both, so the existence of
-      // the zone_factor sensor is a reliable filter that doesn't
-      // depend on the entity registry's `integration` field.
-      if (!eid.startsWith("switch.")) continue;
-      if (eid === "switch.z2m_irrigation_master_enable") continue;
-      const base = eid.replace("switch.", "");
-      if (this._hass.states[`sensor.${base}_zone_factor`]) {
-        // CRITICAL: the zone identifier sent to create_schedule MUST
-        // be the valve's friendly_name (e.g. "Front Garden"), NOT the
-        // slugified entity_id (e.g. "front_garden"). The integration
-        // keys ZoneStore and the running engine's resolver by valve
-        // friendly_name (which is z2m's MQTT friendly_name and the
-        // integration's valve.topic). An earlier rc-2 build of this
-        // card stored the slug, which produced schedules that resolved
-        // to zero zones at fire time and got stamped with outcome
-        // `skipped_no_zones`. friendly_name is always present on
-        // discovered z2m_irrigation switches.
-        const friendlyName = (st.attributes && st.attributes.friendly_name) || base;
-        out.push({
-          id: friendlyName,
-          name: friendlyName,
-        });
-      }
+      if (!eid.startsWith("sensor.")) continue;
+      if (!eid.endsWith("_zone_factor")) continue;
+      // Skip the integration's own zone factor entities for zones we
+      // already added (just in case of dupes from a stale config entry).
+      const fullName = (st.attributes && st.attributes.friendly_name) || eid;
+      // Friendly name is "<Zone Name> Zone Factor" — strip the suffix.
+      const cleaned = fullName.replace(/\s*Zone Factor$/i, "").trim();
+      if (!cleaned) continue;
+      if (seen.has(cleaned)) continue;
+      seen.add(cleaned);
+      out.push({
+        id: cleaned,
+        name: cleaned,
+      });
     }
     out.sort((a, b) => a.name.localeCompare(b.name));
     return out;
@@ -398,6 +472,27 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
       }
 
       .field.hidden { display: none; }
+      .hint.hidden { display: none; }
+
+      /* v4.0-rc-3 (F-B UX) — sun event offset row */
+      .sun-offset-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .sun-offset-row select {
+        flex: 0 0 auto;
+        min-width: 100px;
+      }
+      .sun-offset-row input[type="number"] {
+        flex: 0 0 90px;
+        text-align: right;
+      }
+      .sun-offset-suffix {
+        font-size: 14px;
+        opacity: 0.7;
+      }
 
       /* v4.0-rc-3 (F-J) — existing schedule list */
       .title.small { font-size: 16px; margin-bottom: 12px; }
@@ -554,8 +649,43 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
       </div>
 
       <div class="field">
-        <label>Time (local)</label>
-        <input type="time" id="f-time" value="${this._escape(f.time)}">
+        <label>Time mode</label>
+        <select id="f-time-type">
+          <option value="fixed"${f.time_type === 'fixed' ? ' selected' : ''}>⏰ Fixed time</option>
+          <option value="sun"${f.time_type === 'sun' ? ' selected' : ''}>☀️ Sun event</option>
+        </select>
+      </div>
+
+      <div class="field${f.time_type === 'fixed' ? '' : ' hidden'}" id="f-fixed-time-wrap">
+        <label>Time (local, 24-hour)</label>
+        <input type="time" id="f-fixed-time" value="${this._escape(f.fixed_time)}">
+      </div>
+
+      <div class="field${f.time_type === 'sun' ? '' : ' hidden'}" id="f-sun-event-wrap">
+        <label>Sun event</label>
+        <select id="f-sun-event">
+          ${SUN_EVENTS.map(e => `
+            <option value="${e.value}"${f.sun_event === e.value ? ' selected' : ''}>${e.label}</option>
+          `).join('')}
+        </select>
+      </div>
+
+      <div class="field${f.time_type === 'sun' ? '' : ' hidden'}" id="f-sun-offset-wrap">
+        <label>Offset</label>
+        <div class="sun-offset-row">
+          <select id="f-sun-direction">
+            <option value="before"${f.sun_direction === 'before' ? ' selected' : ''}>Before</option>
+            <option value="after"${f.sun_direction === 'after' ? ' selected' : ''}>After</option>
+          </select>
+          <input type="number" id="f-sun-minutes" min="0" max="180" step="1"
+                 value="${this._escape(String(f.sun_minutes ?? 0))}">
+          <span class="sun-offset-suffix">minutes</span>
+        </div>
+      </div>
+      <div class="hint${f.time_type === 'sun' ? '' : ' hidden'}" id="f-sun-hint">
+        Will fire <strong>${f.sun_minutes || 0} min ${f.sun_direction || 'after'} ${f.sun_event || 'sunrise'}</strong>
+        — computed from your HA system location (Settings → System →
+        General → Location).
       </div>
 
       <div class="field">
@@ -620,8 +750,30 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
     const $name = root.querySelector("#f-name");
     if ($name) $name.addEventListener("input", e => { f.name = e.target.value; });
 
-    const $time = root.querySelector("#f-time");
-    if ($time) $time.addEventListener("input", e => { f.time = e.target.value; });
+    // v4.0-rc-3 (F-B UX) — time mode + sun event dropdowns
+    const $timeType = root.querySelector("#f-time-type");
+    if ($timeType) $timeType.addEventListener("change", e => {
+      f.time_type = e.target.value;
+      this._render();
+    });
+    const $fixedTime = root.querySelector("#f-fixed-time");
+    if ($fixedTime) $fixedTime.addEventListener("input", e => { f.fixed_time = e.target.value; });
+
+    const $sunEvent = root.querySelector("#f-sun-event");
+    if ($sunEvent) $sunEvent.addEventListener("change", e => {
+      f.sun_event = e.target.value;
+      this._render(); // re-render so the hint text updates
+    });
+    const $sunDir = root.querySelector("#f-sun-direction");
+    if ($sunDir) $sunDir.addEventListener("change", e => {
+      f.sun_direction = e.target.value;
+      this._render();
+    });
+    const $sunMin = root.querySelector("#f-sun-minutes");
+    if ($sunMin) $sunMin.addEventListener("input", e => {
+      f.sun_minutes = parseInt(e.target.value, 10) || 0;
+      this._render();
+    });
 
     const $mode = root.querySelector("#f-mode");
     if ($mode) $mode.addEventListener("change", e => {
@@ -701,11 +853,26 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
       this._render();
       return;
     }
-    if (!/^\d{1,2}:\d{2}$/.test(f.time)) {
-      this._lastError = "Time must be HH:MM.";
-      this._lastSuccess = null;
-      this._render();
-      return;
+    // v4.0-rc-3 hotfix iter 3 (F-B UX): serialise the dropdown form
+    // fields into the canonical backend string. The serializer always
+    // produces a valid format because the dropdowns are constrained
+    // to known values.
+    const timeStr = serializeTimeString(f);
+    if (f.time_type === "fixed") {
+      if (!/^\d{1,2}:\d{2}$/.test(timeStr)) {
+        this._lastError = "Pick a valid fixed time.";
+        this._lastSuccess = null;
+        this._render();
+        return;
+      }
+    } else {
+      const minutes = parseInt(f.sun_minutes, 10);
+      if (isNaN(minutes) || minutes < 0 || minutes > 180) {
+        this._lastError = "Sun-event offset must be 0–180 minutes.";
+        this._lastSuccess = null;
+        this._render();
+        return;
+      }
     }
     if (f.mode === "fixed") {
       const liters = parseFloat(f.fixed_liters_per_zone);
@@ -726,7 +893,7 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
     const isEdit = !!f.editing_id;
     const data = {
       name: f.name.trim(),
-      time: f.time,
+      time: timeStr,
       days: f.days.slice(),
       mode: f.mode,
       zones: f.zones.slice(),

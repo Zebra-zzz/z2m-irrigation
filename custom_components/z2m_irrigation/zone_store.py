@@ -492,6 +492,23 @@ class ZoneStore:
     # every successful aggregator build.
     # ─────────────────────────────────────────────────────────────────────
 
+    # ─────────────────────────────────────────────────────────────────────
+    # VPD 24h buffer persistence — v4.0-rc-3 (F-G persistence)
+    #
+    # Stores the VPD rolling-average buffer as a list of
+    # `{"at": ISO_wall_clock, "vpd_kpa": float}` entries so it survives
+    # HA restart. On startup the manager hydrates the in-memory deque
+    # from this, converting wall-clock timestamps back to monotonic
+    # offsets from now. Entries older than 24h are pruned at load time.
+    # ─────────────────────────────────────────────────────────────────────
+
+    def get_vpd_buffer(self) -> Optional[List[Dict[str, Any]]]:
+        return self._data.get("vpd_buffer")
+
+    async def set_vpd_buffer(self, entries: List[Dict[str, Any]]) -> None:
+        self._data["vpd_buffer"] = entries
+        await self._async_save()
+
     def get_daily_summary(self) -> Optional[Dict[str, Any]]:
         return self._data.get("daily_summary")
 

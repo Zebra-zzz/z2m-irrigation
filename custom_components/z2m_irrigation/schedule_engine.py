@@ -191,12 +191,160 @@ class ScheduleEngine:
             self._fired_today_date = today
 
     def _parse_schedule_time(self, sch: Schedule) -> Optional[dt_time]:
+        """Parse a schedule's `time` field.
+
+        v4.0-rc-3 (F-B): if the time field is a sun-relative expression
+        (`sunrise`, `sunset`, with optional `±N` minute offset), this
+        returns None — callers should use `_resolve_schedule_datetime()`
+        instead which knows how to look up the sun integration's
+        `next_rising` / `next_setting` attributes for the target date.
+
+        Plain `HH:MM` returns a naive `dt_time`.
+        """
+        if not sch.time:
+            return None
+        if self._is_sun_relative(sch.time):
+            return None  # caller must use _resolve_schedule_datetime
         try:
             hh, mm = sch.time.split(":", 1)
             return dt_time(int(hh), int(mm))
         except Exception:
             _LOGGER.warning("Schedule %s has invalid time '%s'", sch.id, sch.time)
             return None
+
+    # v4.0-rc-3 (F-B) — sun-relative time support
+    #
+    # Schedule.time can now be one of:
+    #   "06:00"          — fixed local time (24-hour, HA system TZ)
+    #   "sunrise"        — at local sunrise
+    #   "sunrise-45"     — 45 minutes before sunrise
+    #   "sunrise+30"     — 30 minutes after sunrise
+    #   "sunset"         — at local sunset
+    #   "sunset+15"      — 15 minutes after sunset
+    #   "dawn"           — civil dawn (start of civil twilight)
+    #   "dusk"           — civil dusk (end of civil twilight)
+    #   "noon"           — solar noon (highest sun position)
+    #   "midnight"       — solar midnight
+    # All sun events accept an optional ±N minute offset and an
+    # optional trailing 'm' (e.g. "dusk+10m").
+    #
+    # The engine resolves sun-relative times by reading the corresponding
+    # `sun.sun.attributes.next_*` field, which HA's `sun` integration
+    # keeps current using the system location (Settings → System →
+    # General → Edit location). Move HA to a new location and the
+    # times automatically update — nothing in this engine is tied to
+    # a specific lat/lon.
+    SUN_EVENT_ATTR_MAP = {
+        "sunrise": "next_rising",
+        "sunset": "next_setting",
+        "dawn": "next_dawn",
+        "dusk": "next_dusk",
+        "noon": "next_noon",
+        "midnight": "next_midnight",
+    }
+
+    @staticmethod
+    def _is_sun_relative(time_str: str) -> bool:
+        s = (time_str or "").strip().lower()
+        for event in ScheduleEngine.SUN_EVENT_ATTR_MAP:
+            if s.startswith(event):
+                return True
+        return False
+
+    @staticmethod
+    def _parse_sun_offset(time_str: str) -> tuple[Optional[str], int]:
+        """Parse a sun-relative time string into (event, minutes).
+
+        Returns (None, 0) on parse failure. `event` is one of the keys
+        in `SUN_EVENT_ATTR_MAP`. `minutes` is the signed offset
+        (negative = before, positive = after).
+        """
+        import re
+        s = (time_str or "").strip().lower()
+        events_alt = "|".join(ScheduleEngine.SUN_EVENT_ATTR_MAP.keys())
+        m = re.match(rf"^({events_alt})\s*([+-]?\s*\d+)?\s*m?$", s)
+        if not m:
+            return (None, 0)
+        event = m.group(1)
+        offset_str = (m.group(2) or "0").replace(" ", "")
+        try:
+            offset = int(offset_str)
+        except Exception:
+            offset = 0
+        return (event, offset)
+
+    def _resolve_schedule_datetime(
+        self, sch: Schedule, target_date: date,
+    ) -> Optional[datetime]:
+        """Resolve a schedule's fire-time to a concrete tz-aware datetime
+        on `target_date`. Handles both fixed `HH:MM` and sun-relative.
+
+        For sun-relative: reads `sun.sun.attributes.next_rising` /
+        `next_setting`, which is always the NEXT one. If `target_date`
+        is today and the event is in the future, that's our answer.
+        Otherwise we approximate by using the same time-of-day on
+        `target_date` (close enough — sunrise drifts by ~1-2 minutes/day).
+        """
+        local_now = self._local_now()
+        tz = local_now.tzinfo
+
+        if not sch.time:
+            return None
+
+        if not self._is_sun_relative(sch.time):
+            # Fixed HH:MM path
+            try:
+                hh, mm = sch.time.split(":", 1)
+                return datetime.combine(
+                    target_date, dt_time(int(hh), int(mm)), tzinfo=tz,
+                )
+            except Exception:
+                return None
+
+        # Sun-relative path
+        event, offset_min = self._parse_sun_offset(sch.time)
+        if event is None:
+            _LOGGER.warning(
+                "Schedule %s has invalid sun-relative time %r",
+                sch.id, sch.time,
+            )
+            return None
+
+        sun = self.hass.states.get("sun.sun")
+        if sun is None or not sun.attributes:
+            _LOGGER.warning(
+                "Schedule %s wants sun-relative time but sun.sun is unavailable",
+                sch.id,
+            )
+            return None
+
+        # rc-3 (F-B): map any of the 6 supported events to the
+        # corresponding `sun.sun` attribute name.
+        attr_key = self.SUN_EVENT_ATTR_MAP.get(event)
+        if attr_key is None:
+            return None
+        attr_val = sun.attributes.get(attr_key)
+        if not attr_val:
+            return None
+        try:
+            sun_dt = datetime.fromisoformat(str(attr_val).replace("Z", "+00:00"))
+        except Exception:
+            return None
+        sun_local = sun_dt.astimezone(tz)
+
+        # If target_date matches the next sun event, use it directly.
+        # Otherwise project the same hour:minute onto target_date — sun
+        # drift over a week is small enough that the per-minute tick
+        # will catch the actual fire on the day.
+        if sun_local.date() == target_date:
+            return sun_local + timedelta(minutes=offset_min)
+
+        approx = datetime.combine(
+            target_date,
+            dt_time(sun_local.hour, sun_local.minute),
+            tzinfo=tz,
+        )
+        return approx + timedelta(minutes=offset_min)
 
     def _matches_today(self, sch: Schedule) -> bool:
         if not sch.days:
@@ -227,8 +375,20 @@ class ScheduleEngine:
                 continue
             if not self._matches_today(sch):
                 continue
-            if sch.time != current_hm:
-                continue
+
+            # v4.0-rc-3 (F-B): handle both fixed HH:MM and sun-relative
+            # times. For sun-relative, resolve to today's actual fire
+            # time and compare to current minute.
+            if self._is_sun_relative(sch.time):
+                target_dt = self._resolve_schedule_datetime(sch, local_now.date())
+                if target_dt is None:
+                    continue
+                if target_dt.strftime("%H:%M") != current_hm:
+                    continue
+            else:
+                if sch.time != current_hm:
+                    continue
+
             self._fired_today.add(sch.id)
             await self._fire_schedule(sch, trigger="scheduled")
 
@@ -264,11 +424,12 @@ class ScheduleEngine:
                 continue
             if not self._matches_today(sch):
                 continue
-            t = self._parse_schedule_time(sch)
-            if t is None:
-                continue
 
-            sch_dt = datetime.combine(today, t, tzinfo=local_now.tzinfo)
+            # v4.0-rc-3 (F-B): use the unified resolver which handles
+            # both fixed HH:MM and sun-relative time formats.
+            sch_dt = self._resolve_schedule_datetime(sch, today)
+            if sch_dt is None:
+                continue
             if sch_dt > local_now:
                 continue  # still in the future, the per-minute tick will get it
 
@@ -789,15 +950,19 @@ class ScheduleEngine:
         for sch in schedules:
             if not sch.enabled:
                 continue
-            t = self._parse_schedule_time(sch)
-            if t is None:
-                continue
             for day_offset in range(8):
                 check_date = local_now.date() + timedelta(days=day_offset)
                 weekday_token = DAYS_OF_WEEK[check_date.weekday()]
                 if sch.days and weekday_token not in sch.days:
                     continue
-                dt = datetime.combine(check_date, t, tzinfo=local_now.tzinfo)
+                # v4.0-rc-3 (F-B): unified resolver handles HH:MM and
+                # sun-relative formats. For sun-relative on future
+                # dates, this approximates by reusing today's sunrise/
+                # sunset minute — close enough; the per-minute tick
+                # catches the actual fire on the day.
+                dt = self._resolve_schedule_datetime(sch, check_date)
+                if dt is None:
+                    continue
                 if dt <= local_now:
                     continue
                 if best_dt is None or dt < best_dt:

@@ -634,9 +634,16 @@ class TodayCalculationSensor(BaseGlobalSensor):
         result = self.mgr.today_calculation
         if result is None:
             return {"status": "no_data"}
+        # v4.0-rc-3 (F-G): expose snapshot vs 24h average so the
+        # dashboard can show both. `vpd_kpa_effective` is what the
+        # calculator actually used (= 24h avg if available, else the
+        # snapshot).
         return {
             "vpd_kpa": result.weather.vpd_kpa,
             "vpd_kpa_effective": result.weather.effective_vpd,
+            "vpd_snapshot_kpa": getattr(result, "vpd_snapshot_kpa", None),
+            "vpd_24h_avg_kpa": getattr(result, "vpd_24h_avg_kpa", None),
+            "vpd_24h_sample_count": getattr(result, "vpd_sample_count", 0),
             "rain_today_mm": result.weather.rain_today_mm,
             "rain_today_mm_effective": result.weather.effective_rain_today,
             "rain_forecast_24h_mm": result.weather.fc24_mm,

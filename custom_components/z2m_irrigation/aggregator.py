@@ -185,17 +185,26 @@ async def build_daily_summary(
     valves: Dict[str, Any],
     *,
     days_back: int = 30,
+    local_tz: Optional[Any] = None,
 ) -> DailySummary:
     """Query the SQLite db once per valve, zero-fill, and combine.
 
     `valves` is `ValveManager.valves` (mapping of friendly_name → Valve).
     We pass it as a generic dict so this module doesn't have to import
     the Valve dataclass and create a circular dependency.
+
+    `local_tz` (v4.0-rc-3 hotfix): if provided, the daily breakdown bins
+    sessions by LOCAL-time date instead of UTC date. Without this, an
+    Insight tab chart in Melbourne would attribute a session that ran
+    at 22:00 local (= 12:00 UTC) to the previous day. The manager
+    passes `dt_util.DEFAULT_TIME_ZONE` (HA's configured local TZ).
     """
     zone_series: List[ZoneSeries] = []
     for topic, v in valves.items():
         try:
-            rows = await db.get_daily_breakdown(topic, days=days_back)
+            rows = await db.get_daily_breakdown(
+                topic, days=days_back, local_tz=local_tz,
+            )
         except Exception as e:
             _LOGGER.warning(
                 "Aggregator: get_daily_breakdown(%s) failed: %s", topic, e,

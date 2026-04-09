@@ -336,7 +336,17 @@ views:
               **{{ tc }} L** total across **{{ state_attr('sensor.z2m_irrigation_today_calculation', 'runnable_zones') }}**
               of **{{ state_attr('sensor.z2m_irrigation_today_calculation', 'total_zones') }}** zones.
 
-              VPD **{{ state_attr('sensor.z2m_irrigation_today_calculation', 'vpd_kpa_effective') | round(2) }} kPa**
+              {%- set snap = state_attr('sensor.z2m_irrigation_today_calculation', 'vpd_snapshot_kpa') -%}
+              {%- set avg = state_attr('sensor.z2m_irrigation_today_calculation', 'vpd_24h_avg_kpa') -%}
+              {%- set samples = state_attr('sensor.z2m_irrigation_today_calculation', 'vpd_24h_sample_count') or 0 -%}
+              {%- set effective = state_attr('sensor.z2m_irrigation_today_calculation', 'vpd_kpa_effective') -%}
+              **VPD {{ effective | round(2) if effective is not none else '—' }} kPa** —
+              {%- if avg is not none and samples > 0 %}
+                **24h average** ({{ samples }} sample{{ 's' if samples != 1 else '' }} in buffer; live now: **{{ snap | round(2) if snap else '—' }} kPa**)
+              {%- else %}
+                _snapshot only — 24h buffer is filling (1 sample per 15 min, 96 needed for full coverage)_
+              {%- endif %}
+
               · rain today **{{ state_attr('sensor.z2m_irrigation_today_calculation', 'rain_today_mm_effective') | round(1) }} mm**
               · forecast 24h **{{ state_attr('sensor.z2m_irrigation_today_calculation', 'rain_forecast_24h_mm_effective') | round(1) }} mm**
               · dryness factor **{{ state_attr('sensor.z2m_irrigation_today_calculation', 'dryness') | round(2) }}**
@@ -347,9 +357,11 @@ views:
               {% if z.skipped -%}
               ~~**{{ z.zone }}** — skipped ({{ z.skip_reason }})~~
               {% else -%}
-              **{{ z.zone }}** — {{ z.liters }} L ({{ z.need_mm }} mm × {{ z.l_per_mm }} L/mm × {{ z.factor }})
+              **{{ z.zone }}** — {{ z.liters }} L
               {% endif -%}
               {% endfor %}
+
+              _Detailed formula breakdown is on the **Setup tab → Calculation details**._
               {% endif %}
           - type: horizontal-stack
             cards:
@@ -779,7 +791,7 @@ views:
               {% if s == 'no_schedule' %}
               _No schedules yet. Use the **Create schedule** button below to add one._
               {% else %}
-              {% set d = as_datetime(s) %}
+              {% set d = as_datetime(s) | as_local if s else None %}
               **{{ d.strftime('%A %d %b at %H:%M') if d else s }}** —
               **{{ state_attr('sensor.z2m_irrigation_next_run', 'schedule_name') }}**
               ({{ state_attr('sensor.z2m_irrigation_next_run', 'mode') }} mode,
@@ -798,65 +810,20 @@ views:
               _Queue is empty._
               {% endif %}
 
-      # Section: Schedule list — one row per stored schedule
+      # Section: Schedules — single section with the JS editor card
+      #
+      # rc-3 hotfix: dropped the standalone "All schedules" markdown
+      # table that used to live above the editor. The JS editor card
+      # (added in rc-1, edit/delete added in rc-3 F-J) now shows the
+      # full list of existing schedules INSIDE the card with proper
+      # Edit and Delete buttons per row, so the markdown table was
+      # showing exactly the same data minus the controls. Removed.
       - type: grid
         cards:
           - type: heading
-            heading: All schedules
-            heading_style: title
-          - type: markdown
-            content: |
-              **{{ states('sensor.z2m_irrigation_schedules') }}** enabled
-              of **{{ state_attr('sensor.z2m_irrigation_schedules', 'total') }}** total.
-          # v4.0 rc-2 hotfix — was using auto-entities with a Jinja
-          # template to emit one card per schedule, but auto-entities
-          # crashes the inner vertical-stack with "Invalid configuration"
-          # when the template emits zero items. The for-loop with empty
-          # input produces a malformed sequence that the inner stack
-          # can't parse.
-          #
-          # New pattern: a single markdown card that renders the
-          # schedule list as a table via Jinja, with an explicit
-          # empty-state branch. No auto-entities, no inner stack, no
-          # empty-array path. Loses the per-row tap-to-run / hold-to-
-          # toggle controls — those move to the global control row
-          # below the table. Less elegant but bulletproof.
-          - type: markdown
-            content: |
-              {% set schedules = state_attr('sensor.z2m_irrigation_schedules', 'schedules') or [] %}
-              {% if schedules | count == 0 %}
-              _No schedules yet — scroll down to create your first one with the editor below._
-              {% else %}
-              | | Name | Time | Days | Mode | Zones | Last outcome |
-              | --- | --- | --- | --- | --- | ---: | --- |
-              {% for s in schedules -%}
-              | {{ '✅' if s.enabled else '⏸️' }} | **{{ s.name }}** | `{{ s.time }}` | {{ s.days | join(',') if s.days else 'every day' }} | {{ s.mode }} | {{ s.zones | count }} | {{ s.last_run_outcome or '—' }} |
-              {% endfor %}
-
-              ---
-
-              **Run a schedule** by calling `z2m_irrigation.run_schedule_now`
-              with the `schedule_id` from Developer Tools → Services.
-              Tap-to-run / hold-to-toggle returns in v4.1 with a custom
-              JS card.
-              {% endif %}
-
-      # Section: In-dashboard schedule editor (rc-1+)
-      - type: grid
-        cards:
-          - type: heading
-            heading: Create new schedule
+            heading: Schedules
             heading_style: title
           - type: custom:z2m-irrigation-schedule-editor-card
-          - type: markdown
-            content: |
-              **Tap** any row above to force-run that schedule now (gates still apply).
-              **Hold** any row to toggle it enabled/disabled.
-
-              For more advanced edits (rename, change time, change zones),
-              call `z2m_irrigation.update_schedule` from Developer Tools →
-              Services with the schedule's `id` from the row's attributes.
-              An in-dashboard edit form is on the v4.1 roadmap.
           - type: horizontal-stack
             cards:
               - type: custom:mushroom-template-card
@@ -1293,16 +1260,52 @@ views:
               biology — the daily "more/less" tweak goes through the
               `factor` knob above instead.
 
-              - **L per mm** is your zone's effective irrigation area
-                in m² (since 1 mm of water on 1 m² = 1 L exactly).
-                Measure or bucket-test to set. Default 12 = 12 m².
-              - **Base mm/day** is the plant water demand for what
-                you're growing. Lawn ≈ 4 mm, vegetable garden ≈ 6 mm,
-                succulents ≈ 1 mm. Default 4.
+              ### Zone area (m²) — "L per mm" internally
 
-              The calculator multiplies these together with the dryness
-              factor and your `factor` knob to get the final daily
-              litres. Use the `factor` knob above for daily tweaks.
+              Your zone's effective irrigation area in square metres.
+              Because 1 mm of water on 1 m² of ground = exactly **1 L**,
+              this number doubles as "litres needed for 1 mm of depth".
+
+              **Set this once** — measure your bed dimensions OR do a
+              bucket test (run the valve for 1 min, measure delivered L,
+              then `area_m² ≈ delivered_L ÷ flow_mm`). Default `12` = 12 m².
+
+              ### Plant thirst (mm/day) — "base mm" internally
+
+              How much water depth (in mm) the plants in this zone want
+              **per day** under neutral weather conditions (no rain,
+              average humidity). The calculator scales this up on hot/dry
+              days via the dryness factor and subtracts rain.
+
+              **Reference table** (rules of thumb — your local conditions
+              and plant maturity will vary):
+
+              | Plant type | Typical mm/day |
+              | --- | --- |
+              | Succulents / cacti | 0.5 – 1.5 |
+              | Established native shrubs (e.g. lilly pilly) | 2 – 4 |
+              | Lawn (cool climate) | 3 – 5 |
+              | Lawn (warm climate / summer) | 5 – 8 |
+              | Vegetable garden (active) | 5 – 7 |
+              | Tropical / exotic ornamentals | 6 – 10 |
+              | Pots & raised beds | 8 – 12 |
+
+              Default `4` = 4 mm/day, suitable for a cool-climate lawn or
+              an established mixed garden bed.
+
+              ---
+
+              **The full formula** (for the curious):
+
+              ```
+              dryness  = clamp(0.85 + vpd_kpa / 3, 0.8, 1.5)
+              need_mm  = max(0, plant_thirst × dryness − rain_today − 0.7 × forecast_24h)
+              litres   = need_mm × zone_area_m² × tweak_factor
+              ```
+
+              The `tweak factor` knob in the section above is the daily
+              ➖➕ override. The two values below (zone area and plant
+              thirst) are the foundation that the daily knob tweaks.
 
       # Advanced — Front Garden calibration
       - type: grid
@@ -1315,7 +1318,7 @@ views:
               - type: custom:mushroom-template-card
                 primary: |
                   {{ states('sensor.front_garden_zone_l_per_mm') }}
-                secondary: L per mm (≈ area m²)
+                secondary: Zone area (m²)
                 icon: mdi:water-percent
                 icon_color: blue
               - type: custom:button-card
@@ -1353,7 +1356,7 @@ views:
               - type: custom:mushroom-template-card
                 primary: |
                   {{ states('sensor.front_garden_zone_base_mm') }}
-                secondary: base mm/day
+                secondary: Plant thirst (mm/day)
                 icon: mdi:waves-arrow-up
                 icon_color: indigo
               - type: custom:button-card
@@ -1398,7 +1401,7 @@ views:
               - type: custom:mushroom-template-card
                 primary: |
                   {{ states('sensor.lilly_pilly_zone_l_per_mm') }}
-                secondary: L per mm (≈ area m²)
+                secondary: Zone area (m²)
                 icon: mdi:water-percent
                 icon_color: blue
               - type: custom:button-card
@@ -1436,7 +1439,7 @@ views:
               - type: custom:mushroom-template-card
                 primary: |
                   {{ states('sensor.lilly_pilly_zone_base_mm') }}
-                secondary: base mm/day
+                secondary: Plant thirst (mm/day)
                 icon: mdi:waves-arrow-up
                 icon_color: indigo
               - type: custom:button-card
@@ -1481,7 +1484,7 @@ views:
               - type: custom:mushroom-template-card
                 primary: |
                   {{ states('sensor.back_garden_zone_l_per_mm') }}
-                secondary: L per mm (≈ area m²)
+                secondary: Zone area (m²)
                 icon: mdi:water-percent
                 icon_color: blue
               - type: custom:button-card
@@ -1519,7 +1522,7 @@ views:
               - type: custom:mushroom-template-card
                 primary: |
                   {{ states('sensor.back_garden_zone_base_mm') }}
-                secondary: base mm/day
+                secondary: Plant thirst (mm/day)
                 icon: mdi:waves-arrow-up
                 icon_color: indigo
               - type: custom:button-card
@@ -1564,7 +1567,7 @@ views:
               - type: custom:mushroom-template-card
                 primary: |
                   {{ states('sensor.mains_taps_zone_l_per_mm') }}
-                secondary: L per mm (≈ area m²)
+                secondary: Zone area (m²)
                 icon: mdi:water-percent
                 icon_color: blue
               - type: custom:button-card
@@ -1602,7 +1605,7 @@ views:
               - type: custom:mushroom-template-card
                 primary: |
                   {{ states('sensor.mains_taps_zone_base_mm') }}
-                secondary: base mm/day
+                secondary: Plant thirst (mm/day)
                 icon: mdi:waves-arrow-up
                 icon_color: indigo
               - type: custom:button-card
@@ -1770,10 +1773,13 @@ views:
               _Aggregation cache is empty — waiting for the first refresh._
               {% else %}
               {% set sorted_z = zones | sort(attribute='total_liters', reverse=True) %}
-              | Zone | Liters | Minutes | Sessions |
-              | --- | ---: | ---: | ---: |
+              | Zone | Litres (30d) | Last 24h | Last 7d | Minutes | Sessions |
+              | --- | ---: | ---: | ---: | ---: | ---: |
               {% for z in sorted_z -%}
-              | **{{ z.name }}** | {{ z.total_liters }} | {{ z.total_minutes }} | {{ z.total_sessions }} |
+              {%- set slug = z.zone | lower | replace(' ', '_') -%}
+              {%- set h24 = states('sensor.' ~ slug ~ '_last_24h') -%}
+              {%- set d7 = states('sensor.' ~ slug ~ '_last_7_days') -%}
+              | **{{ z.name }}** | {{ z.total_liters }} L | {{ h24 if h24 not in ['unknown','unavailable'] else '—' }} L | {{ d7 if d7 not in ['unknown','unavailable'] else '—' }} L | {{ z.total_minutes }} | {{ z.total_sessions }} |
               {% endfor %}
               {% endif %}
 
@@ -1824,7 +1830,7 @@ views:
               ({{ states('sensor.z2m_irrigation_schedule_history') }} total in window).
 
               {% for e in events[:30] -%}
-              {% set dt = as_datetime(e.at) %}
+              {% set dt = (as_datetime(e.at) | as_local) if e.at else None %}
               {% if e.kind == 'fired' -%}
               ✅ **{{ dt.strftime('%a %d %b %H:%M') if dt else e.at }}** — fired
               **{{ e.schedule_name }}**
@@ -1899,7 +1905,7 @@ views:
               | When | Zone | Trigger | Target | Delivered | Duration | Avg flow | OK |
               | --- | --- | --- | ---: | ---: | ---: | ---: | :---: |
               {% for s in sessions[:50] -%}
-              {%- set ended = as_datetime(s.ended_at) if s.ended_at else None -%}
+              {%- set ended = (as_datetime(s.ended_at) | as_local) if s.ended_at else None -%}
               {%- set when = ended.strftime('%a %d %b %H:%M') if ended else (s.ended_at or '?') -%}
               {%- set trig = s.trigger_type or '?' -%}
               {%- set target = '' -%}

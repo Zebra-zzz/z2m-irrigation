@@ -44,7 +44,7 @@ from .const import (
 )
 from .database import IrrigationDatabase
 from .zone_store import ZoneStore
-from .calculator import CalculatorResult, compute as compute_calculator
+from .calculator import CalculatorResult, WeatherInputs, compute as compute_calculator
 from .weather import read_inputs as read_weather_inputs
 from .schedule_engine import ScheduleEngine
 from .aggregator import DailySummary, build_daily_summary
@@ -246,6 +246,26 @@ class ValveManager:
         # startup so charts have data immediately on cold restart.
         self.daily_summary: Optional[DailySummary] = None
 
+        # v4.0-rc-3 (F-G) — VPD 24h rolling average buffer.
+        #
+        # The calculator's dryness factor is highly time-of-day sensitive
+        # because instantaneous VPD swings between the cool low-VPD
+        # morning and the hot high-VPD afternoon. A schedule that fires
+        # at 6am sees a low VPD reading and under-counts the day's
+        # heat stress; the same schedule at 2pm sees a maxed-out VPD
+        # and over-counts. The 24h rolling average smooths this so the
+        # calculator output reflects the day's *integrated* heat stress
+        # rather than a single-point snapshot.
+        #
+        # Samples are appended on every `_periodic_recalculate_today`
+        # tick (every 15 min). Each entry is a `(monotonic_ts, vpd_kpa)`
+        # tuple. Old entries are pruned at append time. Cold start has
+        # no history → average == snapshot until the buffer fills.
+        from collections import deque
+        self._vpd_samples: deque = deque()
+        # Maximum buffer age in seconds — 24 hours.
+        self._VPD_BUFFER_MAX_AGE_S = 24 * 3600
+
     def _schedule_task(self, coro):
         """Schedule an async task from a callback (thread-safe)."""
         self.hass.loop.call_soon_threadsafe(
@@ -337,6 +357,13 @@ class ValveManager:
                     )
             except Exception as e:
                 _LOGGER.warning("Failed to hydrate daily summary: %s", e)
+
+        # v4.0-rc-3 (F-G persist) — hydrate VPD 24h buffer from store
+        # so the rolling average survives HA restart.
+        try:
+            self._hydrate_vpd_buffer()
+        except Exception as e:
+            _LOGGER.warning("Failed to hydrate VPD buffer: %s", e)
 
         # Ask Z2M to send the device list (ignore if MQTT not ready)
         try:
@@ -521,6 +548,96 @@ class ValveManager:
         )
         self._notify_global()
 
+    # ─────────────────────────────────────────────────────────────────────
+    # v4.0-rc-3 (F-G) — VPD 24h rolling average
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _sample_vpd_local(self, value: Optional[float]) -> None:
+        """Append a VPD sample to the in-memory rolling 24h buffer + prune.
+
+        Does NOT persist — call `_persist_vpd_buffer` after this to
+        write to the ZoneStore (must be called from an async context).
+        """
+        if value is None:
+            return
+        now = time.monotonic()
+        self._vpd_samples.append((now, float(value)))
+        cutoff = now - self._VPD_BUFFER_MAX_AGE_S
+        while self._vpd_samples and self._vpd_samples[0][0] < cutoff:
+            self._vpd_samples.popleft()
+
+    async def _persist_vpd_buffer(self) -> None:
+        """Write the in-memory VPD buffer to the ZoneStore for restart survival."""
+        if self.zone_store is None or not self._vpd_samples:
+            return
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            wall_now = _dt.now(_tz.utc).timestamp()
+            mono_now = time.monotonic()
+            entries = []
+            for mono_ts, vpd in self._vpd_samples:
+                wall_ts = wall_now - (mono_now - mono_ts)
+                entries.append({
+                    "at": _dt.fromtimestamp(wall_ts, _tz.utc).isoformat(),
+                    "vpd_kpa": round(vpd, 6),
+                })
+            await self.zone_store.set_vpd_buffer(entries)
+        except Exception as e:
+            _LOGGER.warning("Failed to persist VPD buffer: %s", e)
+
+    def _hydrate_vpd_buffer(self) -> None:
+        """Load the persisted VPD buffer from the ZoneStore on startup.
+
+        Converts wall-clock ISO timestamps back to monotonic offsets
+        from now. Entries older than 24h are pruned at load time.
+        """
+        if self.zone_store is None:
+            return
+        raw = self.zone_store.get_vpd_buffer()
+        if not raw:
+            return
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        now_wall = _dt.now(_tz.utc)
+        now_mono = time.monotonic()
+        cutoff_wall = now_wall - _td(seconds=self._VPD_BUFFER_MAX_AGE_S)
+        loaded = 0
+        for entry in raw:
+            try:
+                at_str = entry.get("at", "")
+                vpd = float(entry.get("vpd_kpa", 0))
+                at_dt = _dt.fromisoformat(at_str.replace("Z", "+00:00"))
+                if at_dt < cutoff_wall:
+                    continue  # too old
+                # Convert wall-clock → monotonic offset from now
+                delta_s = (now_wall - at_dt).total_seconds()
+                mono_ts = now_mono - delta_s
+                self._vpd_samples.append((mono_ts, vpd))
+                loaded += 1
+            except Exception:
+                continue
+        if loaded:
+            _LOGGER.info(
+                "📊 VPD buffer hydrated: %d sample(s) from store (24h window)",
+                loaded,
+            )
+
+    @property
+    def vpd_24h_average(self) -> Optional[float]:
+        """Mean of the rolling 24h VPD buffer, or None if empty.
+
+        Cold start has no history so returns None until the first
+        sample lands. The calculator falls back to the snapshot in
+        that case.
+        """
+        if not self._vpd_samples:
+            return None
+        total = sum(v for _ts, v in self._vpd_samples)
+        return total / len(self._vpd_samples)
+
+    @property
+    def vpd_24h_sample_count(self) -> int:
+        return len(self._vpd_samples)
+
     async def recalculate_today(self) -> Optional[CalculatorResult]:
         """Run the calculator over current zone config + weather and cache.
 
@@ -545,11 +662,46 @@ class ValveManager:
             rain_forecast_24h_entity=self.weather_rain_forecast_24h_entity,
             temp_entity=self.weather_temp_entity,
         )
+
+        # v4.0-rc-3 (F-G) — VPD 24h rolling average
+        #
+        # 1. Append the current snapshot reading to the rolling buffer.
+        # 2. If the average is available (≥ 1 sample), substitute it
+        #    for the snapshot in the calculator inputs. This smooths
+        #    the dryness factor across the day so it reflects the
+        #    integrated heat stress instead of "VPD right now". Cold
+        #    start with no history → calculator falls back to snapshot.
+        # 3. Stash the snapshot value separately on the result for the
+        #    dashboard so the user can see both numbers.
+        snapshot_vpd = weather.vpd_kpa
+        self._sample_vpd_local(snapshot_vpd)
+        # Persist the buffer inline (we're already in an async context).
+        await self._persist_vpd_buffer()
+        avg_vpd = self.vpd_24h_average
+        if avg_vpd is not None:
+            weather = WeatherInputs(
+                vpd_kpa=avg_vpd,
+                rain_today_mm=weather.rain_today_mm,
+                fc24_mm=weather.fc24_mm,
+                temp_c=weather.temp_c,
+            )
+
         result = compute_calculator(
             zones=zones,
             weather=weather,
             global_min_run_liters=self.global_min_run_liters,
         )
+
+        # Attach VPD-source diagnostic metadata to the cached result
+        # so the dashboard can show snapshot vs 24h-avg side by side.
+        # Stored as plain attributes on the result object — they don't
+        # affect the calculation, just visibility.
+        try:
+            result.vpd_snapshot_kpa = snapshot_vpd
+            result.vpd_24h_avg_kpa = avg_vpd
+            result.vpd_sample_count = self.vpd_24h_sample_count
+        except Exception:
+            pass
         self.today_calculation = result
         _LOGGER.debug(
             "📊 Calculator refreshed: vpd=%s rain=%s fc24=%s → %.2f L "
@@ -585,7 +737,12 @@ class ValveManager:
         if not self.valves:
             return None
         try:
-            summary = await build_daily_summary(self.db, self.valves)
+            # rc-3 hotfix: pass HA's configured local timezone so the
+            # daily breakdown bins by local-time date instead of UTC.
+            from homeassistant.util import dt as dt_util
+            summary = await build_daily_summary(
+                self.db, self.valves, local_tz=dt_util.DEFAULT_TIME_ZONE,
+            )
         except Exception as e:
             _LOGGER.error("Daily summary build failed: %s", e, exc_info=True)
             return None
