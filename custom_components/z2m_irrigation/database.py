@@ -567,6 +567,175 @@ class IrrigationDatabase:
                 return None
 
     # ─────────────────────────────────────────────────────────────────────
+    # v4.0-rc-3 — last completed session lookup for cold-start hydration
+    #
+    # Without this, `Valve.last_session_liters` is None until the first
+    # session ends after an HA restart. The dashboard's per-zone tile
+    # metric reads `— L` for hours/days even though the SQLite session
+    # history has the data. B5 fix: load it on startup.
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def get_last_session(self, valve_topic: str) -> Optional[Dict[str, Any]]:
+        """Return the most recent COMPLETED session for one valve.
+
+        Returns a dict with `volume_liters`, `duration_minutes`,
+        `started_at`, `ended_at`, `trigger_type`, `target_liters`,
+        `target_minutes` — i.e. everything the dashboard might need to
+        render the last-run metric and the session log table.
+
+        Returns None if there's no completed session for this valve.
+        """
+        return await self.hass.async_add_executor_job(
+            self._get_last_session_sync, valve_topic,
+        )
+
+    def _get_last_session_sync(self, valve_topic: str) -> Optional[Dict[str, Any]]:
+        if not self._conn or not valve_topic:
+            return None
+        with self._lock:
+            try:
+                cursor = self._conn.execute(
+                    """
+                    SELECT volume_liters, duration_minutes, started_at,
+                           ended_at, trigger_type, target_liters, target_minutes
+                    FROM sessions
+                    WHERE valve_topic = ?
+                      AND ended_at IS NOT NULL
+                    ORDER BY ended_at DESC
+                    LIMIT 1
+                    """,
+                    (str(valve_topic),),
+                )
+                try:
+                    row = cursor.fetchone()
+                    if not row:
+                        return None
+                    return {
+                        "volume_liters": float(row["volume_liters"] or 0),
+                        "duration_minutes": float(row["duration_minutes"] or 0),
+                        "started_at": row["started_at"],
+                        "ended_at": row["ended_at"],
+                        "trigger_type": row["trigger_type"],
+                        "target_liters": (
+                            float(row["target_liters"])
+                            if row["target_liters"] is not None else None
+                        ),
+                        "target_minutes": (
+                            float(row["target_minutes"])
+                            if row["target_minutes"] is not None else None
+                        ),
+                    }
+                finally:
+                    cursor.close()
+            except Exception as e:
+                _LOGGER.error(
+                    "❌ Error getting last session for %s: %s",
+                    valve_topic, e, exc_info=True,
+                )
+                return None
+
+    # ─────────────────────────────────────────────────────────────────────
+    # v4.0-rc-3 — recent sessions list for the Session Log tab (F-I)
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def get_recent_sessions(
+        self, limit: int = 200, valve_topic: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return the most recent N completed sessions, newest first.
+
+        Powers the Session Log tab. Each row carries everything the user
+        might want to see: timestamps, trigger type (`manual` /
+        `volume` / `timed` / `schedule_smart:<id>` / `schedule_fixed:<id>`),
+        target parameters, and final delivered values.
+
+        Optional `valve_topic` filter for per-zone log views (not used
+        by the global Log tab but available for future per-zone drill-down).
+        """
+        return await self.hass.async_add_executor_job(
+            self._get_recent_sessions_sync, limit, valve_topic,
+        )
+
+    def _get_recent_sessions_sync(
+        self, limit: int, valve_topic: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        if not self._conn:
+            return []
+        with self._lock:
+            try:
+                if valve_topic:
+                    cursor = self._conn.execute(
+                        """
+                        SELECT session_id, valve_topic, valve_name,
+                               started_at, ended_at, duration_minutes,
+                               volume_liters, avg_flow_rate, trigger_type,
+                               target_liters, target_minutes,
+                               completed_successfully
+                        FROM sessions
+                        WHERE valve_topic = ?
+                          AND ended_at IS NOT NULL
+                        ORDER BY ended_at DESC
+                        LIMIT ?
+                        """,
+                        (str(valve_topic), int(limit)),
+                    )
+                else:
+                    cursor = self._conn.execute(
+                        """
+                        SELECT session_id, valve_topic, valve_name,
+                               started_at, ended_at, duration_minutes,
+                               volume_liters, avg_flow_rate, trigger_type,
+                               target_liters, target_minutes,
+                               completed_successfully
+                        FROM sessions
+                        WHERE ended_at IS NOT NULL
+                        ORDER BY ended_at DESC
+                        LIMIT ?
+                        """,
+                        (int(limit),),
+                    )
+                try:
+                    rows = cursor.fetchall()
+                    return [
+                        {
+                            "session_id": r["session_id"],
+                            "valve": r["valve_topic"],
+                            "name": r["valve_name"],
+                            "started_at": r["started_at"],
+                            "ended_at": r["ended_at"],
+                            "duration_minutes": (
+                                round(float(r["duration_minutes"]), 2)
+                                if r["duration_minutes"] is not None else None
+                            ),
+                            "volume_liters": (
+                                round(float(r["volume_liters"]), 2)
+                                if r["volume_liters"] is not None else None
+                            ),
+                            "avg_flow_lpm": (
+                                round(float(r["avg_flow_rate"]), 3)
+                                if r["avg_flow_rate"] is not None else None
+                            ),
+                            "trigger_type": r["trigger_type"],
+                            "target_liters": (
+                                float(r["target_liters"])
+                                if r["target_liters"] is not None else None
+                            ),
+                            "target_minutes": (
+                                float(r["target_minutes"])
+                                if r["target_minutes"] is not None else None
+                            ),
+                            "completed_successfully": bool(r["completed_successfully"]),
+                        }
+                        for r in rows
+                    ]
+                finally:
+                    cursor.close()
+            except Exception as e:
+                _LOGGER.error(
+                    "❌ Error getting recent sessions: %s", e, exc_info=True,
+                )
+                return []
+
+    # ─────────────────────────────────────────────────────────────────────
     # v3.1 — Safety: in-flight session recovery support
     # ─────────────────────────────────────────────────────────────────────
 

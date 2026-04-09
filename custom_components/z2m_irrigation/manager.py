@@ -681,6 +681,25 @@ class ValveManager:
                 topic, lookback=HISTORICAL_FLOW_LOOKBACK_SESSIONS,
             )
 
+            # v4.0-rc-3 (B5 fix) — load the most recent completed
+            # session's volume so the per-zone tile metric and the
+            # `<zone>_last_run_liters` sensor have a value to display
+            # immediately on cold start. Without this, the field stays
+            # None until the next session ends, which can be hours or
+            # days after a restart.
+            try:
+                last = await self.db.get_last_session(topic)
+                if last:
+                    v.last_session_liters = round(last["volume_liters"], 2)
+                    _LOGGER.info(
+                        "B5: hydrated last_session_liters for %s = %.2f L",
+                        topic, v.last_session_liters,
+                    )
+            except Exception as e:
+                _LOGGER.warning(
+                    "B5: failed to load last session for %s: %s", topic, e,
+                )
+
             _LOGGER.info("Loaded totals for %s: %.2f L lifetime, %.2f L resettable, %.2f L (24h), %.2f L (7d), last session: %s",
                         name, v.lifetime_total_liters, v.total_liters, v.last_24h_liters, v.last_7d_liters, v.last_session_start)
 

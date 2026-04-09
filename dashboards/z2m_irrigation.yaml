@@ -60,8 +60,8 @@ button_card_templates:
     triggers_update:
       - binary_sensor.z2m_irrigation_panic
       - binary_sensor.z2m_irrigation_any_running
-      - sensor.z2m_irrigation_next_run_summary
-      - sensor.z2m_irrigation_active_session_summary
+      - sensor.z2m_irrigation_next_run
+      - sensor.z2m_irrigation_active_session
       - switch.z2m_irrigation_master_enable
     styles:
       card:
@@ -102,27 +102,51 @@ button_card_templates:
           - height: 100%
           - background: var(--accent)
           - border-radius: 18px 0 0 18px
+    # v4.0 rc-2 hotfix — every state read is null-guarded. Earlier
+    # versions assumed the entities were always loaded, which crashed
+    # the Hero card with `Cannot read properties of undefined` during
+    # the brief window after HA restart when integrations are still
+    # warming up.
     custom_fields:
       accent: >-
         [[[
-          if (states['binary_sensor.z2m_irrigation_panic'].state === 'on') return 'panic';
-          if (states['binary_sensor.z2m_irrigation_any_running'].state === 'on') return 'running';
-          if (states['switch.z2m_irrigation_master_enable'].state === 'off') return 'paused';
-          if (states['sensor.z2m_irrigation_next_run_summary'].state === 'no_schedule') return 'idle';
+          const get = (id) => states[id];
+          const isOn = (id) => { const s = get(id); return s && s.state === 'on'; };
+          const isOff = (id) => { const s = get(id); return s && s.state === 'off'; };
+          if (isOn('binary_sensor.z2m_irrigation_panic')) return 'panic';
+          if (isOn('binary_sensor.z2m_irrigation_any_running')) return 'running';
+          if (isOff('switch.z2m_irrigation_master_enable')) return 'paused';
+          const next = get('sensor.z2m_irrigation_next_run');
+          if (!next || next.state === 'no_schedule' || next.state === 'unknown' || next.state === 'unavailable')
+            return 'idle';
           return 'scheduled';
         ]]]
+      # v4.0 rc-2 hotfix iter 2 — title and sub now use
+      # `binary_sensor.z2m_irrigation_any_running.attributes.running_valves`
+      # which is the authoritative live list of all currently-active
+      # valves. Earlier versions read `sensor.z2m_irrigation_active_session`
+      # which only tracked one valve at a time and missed parallel
+      # manual runs (D7).
       title: >-
         [[[
-          if (states['binary_sensor.z2m_irrigation_panic'].state === 'on')
+          const get = (id) => states[id];
+          const isOn = (id) => { const s = get(id); return s && s.state === 'on'; };
+          const isOff = (id) => { const s = get(id); return s && s.state === 'off'; };
+          if (isOn('binary_sensor.z2m_irrigation_panic'))
             return '🚨 Kill the water pump';
-          if (states['binary_sensor.z2m_irrigation_any_running'].state === 'on') {
-            const a = states['sensor.z2m_irrigation_active_session_summary'];
-            return 'Running ' + (a.state || 'a zone');
+          if (isOn('binary_sensor.z2m_irrigation_any_running')) {
+            const ar = get('binary_sensor.z2m_irrigation_any_running');
+            const valves = (ar && ar.attributes && ar.attributes.running_valves) || [];
+            if (valves.length === 0) return 'Running';
+            if (valves.length === 1) return 'Running ' + valves[0].name;
+            if (valves.length === 2) return 'Running ' + valves[0].name + ' + ' + valves[1].name;
+            return 'Running ' + valves.length + ' zones';
           }
-          if (states['switch.z2m_irrigation_master_enable'].state === 'off')
+          if (isOff('switch.z2m_irrigation_master_enable'))
             return 'Paused';
-          const next = states['sensor.z2m_irrigation_next_run_summary'];
-          if (next.state === 'no_schedule') return 'No schedule yet';
+          const next = get('sensor.z2m_irrigation_next_run');
+          if (!next || next.state === 'no_schedule' || next.state === 'unknown' || next.state === 'unavailable')
+            return 'No schedule yet';
           const d = new Date(next.state);
           if (isNaN(d.getTime())) return 'Idle';
           const opts = { weekday: 'long', hour: '2-digit', minute: '2-digit' };
@@ -130,26 +154,43 @@ button_card_templates:
         ]]]
       sub: >-
         [[[
-          if (states['binary_sensor.z2m_irrigation_panic'].state === 'on') {
-            const attrs = states['binary_sensor.z2m_irrigation_panic'].attributes;
+          const get = (id) => states[id];
+          const isOn = (id) => { const s = get(id); return s && s.state === 'on'; };
+          const isOff = (id) => { const s = get(id); return s && s.state === 'off'; };
+          if (isOn('binary_sensor.z2m_irrigation_panic')) {
+            const p = get('binary_sensor.z2m_irrigation_panic');
+            const attrs = (p && p.attributes) || {};
             return 'Reason: ' + (attrs.reason || 'unknown') +
                    ' · clear via z2m_irrigation.clear_panic once water is confirmed off.';
           }
-          if (states['binary_sensor.z2m_irrigation_any_running'].state === 'on') {
-            const a = states['sensor.z2m_irrigation_active_session_summary'].attributes;
-            const liters = (a.session_liters || 0).toFixed(1);
-            const target = a.target_liters ? '/ ' + a.target_liters.toFixed(0) + ' L' : '';
-            const flow = (a.flow_lpm || 0).toFixed(2);
-            return liters + ' L ' + target + ' · ' + flow + ' L/min';
+          if (isOn('binary_sensor.z2m_irrigation_any_running')) {
+            const ar = get('binary_sensor.z2m_irrigation_any_running');
+            const valves = (ar && ar.attributes && ar.attributes.running_valves) || [];
+            if (valves.length === 0) return 'Tap a zone tile below to stop it.';
+            // Per-valve breakdown: name + delivered + flow rate
+            const lines = valves.map(v => {
+              const slug = v.valve.toLowerCase().replace(/ /g, '_');
+              const flow = states['sensor.' + slug + '_flow'];
+              const remL = states['sensor.' + slug + '_remaining_liters'];
+              const used = (v.session_liters != null) ? v.session_liters.toFixed(1) : '—';
+              const flowStr = (flow && flow.state && flow.state !== 'unknown')
+                ? parseFloat(flow.state).toFixed(2) + ' L/min' : '';
+              const remStr = (remL && remL.state && remL.state !== 'unknown')
+                ? ' · ' + parseFloat(remL.state).toFixed(1) + ' L left' : '';
+              return v.name + ': ' + used + ' L' +
+                     (flowStr ? ' · ' + flowStr : '') + remStr;
+            });
+            return lines.join(' • ') + ' · Tap any zone tile below to stop.';
           }
-          if (states['switch.z2m_irrigation_master_enable'].state === 'off')
+          if (isOff('switch.z2m_irrigation_master_enable'))
             return 'Scheduler paused. Toggle Master Enable to resume.';
-          const next = states['sensor.z2m_irrigation_next_run_summary'].attributes;
-          if (!next.schedule_name) return 'Create a schedule on the Schedule tab to get started.';
-          const liters = next.estimated_total_liters
-            ? next.estimated_total_liters.toFixed(1) + ' L estimated'
+          const next = get('sensor.z2m_irrigation_next_run');
+          const a = (next && next.attributes) || {};
+          if (!a.schedule_name) return 'Create a schedule on the Schedule tab to get started.';
+          const liters = a.estimated_total_liters != null
+            ? a.estimated_total_liters.toFixed(1) + ' L estimated'
             : '';
-          return next.schedule_name + ' · ' + (next.zones || []).length + ' zones' +
+          return a.schedule_name + ' · ' + ((a.zones || []).length) + ' zones' +
                  (liters ? ' · ' + liters : '');
         ]]]
       bar: ""
@@ -249,14 +290,14 @@ views:
               - type: custom:mushroom-template-card
                 primary: Skip today
                 secondary: >-
-                  {% if state_attr('sensor.z2m_irrigation_next_run_summary', 'skip_today') %}
+                  {% if state_attr('sensor.z2m_irrigation_next_run', 'skip_today') %}
                     Currently skipping
                   {% else %}
                     Stop today's runs
                   {% endif %}
                 icon: mdi:debug-step-over
                 icon_color: >-
-                  {% if state_attr('sensor.z2m_irrigation_next_run_summary', 'skip_today') %}
+                  {% if state_attr('sensor.z2m_irrigation_next_run', 'skip_today') %}
                     orange
                   {% else %}
                     grey
@@ -264,7 +305,7 @@ views:
                 tap_action:
                   action: call-service
                   service: >-
-                    {% if state_attr('sensor.z2m_irrigation_next_run_summary', 'skip_today') %}
+                    {% if state_attr('sensor.z2m_irrigation_next_run', 'skip_today') %}
                       z2m_irrigation.clear_skip_today
                     {% else %}
                       z2m_irrigation.skip_today
@@ -321,60 +362,252 @@ views:
                   action: call-service
                   service: z2m_irrigation.recalculate_now
 
-      # Section 3: Per-zone live tiles (one per discovered valve)
+      # Section 3: Per-zone live tiles
+      #
+      # v4.0 rc-2 hotfix iteration 2:
+      #   - Switch entity_id: was `switch.<zone>`, actual is
+      #     `switch.<zone>_valve` (D6).
+      #   - Metric: was always showing `_last_run_liters` (end-of-session
+      #     data). Now LIVE: `_session_used` while running, falling back
+      #     to `_last_run_liters` when idle (D9).
+      #   - Sub-line: shows live flow + remaining when running, last-run
+      #     timestamp when idle (D9).
+      #   - Tap action: when the valve is ON, tap fires
+      #     `switch.turn_off` with a confirmation dialog so manual runs
+      #     are stoppable from the dashboard (D8). When OFF, tap opens
+      #     the more-info dialog as before.
       - type: grid
         cards:
           - type: heading
             heading: Zones
             heading_style: title
-          - type: custom:auto-entities
-            card:
-              type: grid
-              columns: 2
-              square: false
-            filter:
-              exclude:
-                - entity_id: switch.z2m_irrigation_master_enable
-              include:
-                - integration: z2m_irrigation
-                  domain: switch
-                  options:
-                    type: custom:button-card
-                    template: z2m_zone_tile
-                    entity: this.entity_id
-                    custom_fields:
-                      name: |
-                        [[[
-                          return entity.attributes.friendly_name || entity.entity_id;
-                        ]]]
-                      status: |
-                        [[[
-                          if (entity.state === 'on') return 'open';
-                          return 'closed';
-                        ]]]
-                      metric: |
-                        [[[
-                          // Try to read this zone's last_run_liters via the parallel sensor.
-                          const base = entity.entity_id.replace('switch.', '');
-                          const liters = states['sensor.' + base + '_last_run_liters'];
-                          if (liters && liters.state && liters.state !== 'unknown')
-                            return liters.state + ' L';
-                          return '— L';
-                        ]]]
-                      sub: |
-                        [[[
-                          const base = entity.entity_id.replace('switch.', '');
-                          const at = states['sensor.' + base + '_last_run_at'];
-                          if (!at || at.state === 'unknown') return 'No history yet';
-                          const d = new Date(at.state);
-                          if (isNaN(d.getTime())) return at.state;
-                          const opts = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
-                          return 'Last run ' + d.toLocaleString(undefined, opts);
-                        ]]]
-            sort:
-              method: friendly_name
+          - type: grid
+            columns: 2
+            square: false
+            cards:
+              - type: custom:button-card
+                template: z2m_zone_tile
+                entity: switch.front_garden_valve
+                tap_action:
+                  action: call-service
+                  service: |
+                    [[[ return entity && entity.state === 'on'
+                          ? 'switch.turn_off'
+                          : 'homeassistant.update_entity'; ]]]
+                  target:
+                    entity_id: switch.front_garden_valve
+                  confirmation:
+                    text: |
+                      [[[ return entity && entity.state === 'on'
+                            ? 'Stop Front Garden now?'
+                            : null; ]]]
+                custom_fields:
+                  name: Front Garden
+                  status: |
+                    [[[ return entity && entity.state === 'on' ? 'RUNNING' : 'closed'; ]]]
+                  metric: |
+                    [[[
+                      const isOn = entity && entity.state === 'on';
+                      if (isOn) {
+                        const live = states['sensor.front_garden_session_used'];
+                        if (live && live.state && live.state !== 'unknown')
+                          return parseFloat(live.state).toFixed(1) + ' L';
+                      }
+                      const s = states['sensor.front_garden_last_run_liters'];
+                      return (s && s.state && s.state !== 'unknown' && s.state !== 'unavailable')
+                        ? s.state + ' L' : '— L';
+                    ]]]
+                  sub: |
+                    [[[
+                      const isOn = entity && entity.state === 'on';
+                      if (isOn) {
+                        const flow = states['sensor.front_garden_flow'];
+                        const remL = states['sensor.front_garden_remaining_liters'];
+                        const flowStr = (flow && flow.state && flow.state !== 'unknown')
+                          ? parseFloat(flow.state).toFixed(2) + ' L/min' : '—';
+                        const remStr = (remL && remL.state && remL.state !== 'unknown')
+                          ? ' · ' + parseFloat(remL.state).toFixed(1) + ' L left'
+                          : '';
+                        return '🔵 ' + flowStr + remStr + ' · TAP TO STOP';
+                      }
+                      const at = states['sensor.front_garden_last_run_at'];
+                      if (!at || !at.state || at.state === 'unknown' || at.state === 'unavailable')
+                        return 'No history yet';
+                      const d = new Date(at.state);
+                      if (isNaN(d.getTime())) return at.state;
+                      return 'Last run ' + d.toLocaleString(undefined,
+                        { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                    ]]]
 
-      # Section 4: Manual run sliders
+              - type: custom:button-card
+                template: z2m_zone_tile
+                entity: switch.lilly_pilly_valve
+                tap_action:
+                  action: call-service
+                  service: |
+                    [[[ return entity && entity.state === 'on'
+                          ? 'switch.turn_off'
+                          : 'homeassistant.update_entity'; ]]]
+                  target:
+                    entity_id: switch.lilly_pilly_valve
+                  confirmation:
+                    text: |
+                      [[[ return entity && entity.state === 'on'
+                            ? 'Stop Lilly Pilly now?'
+                            : null; ]]]
+                custom_fields:
+                  name: Lilly Pilly
+                  status: |
+                    [[[ return entity && entity.state === 'on' ? 'RUNNING' : 'closed'; ]]]
+                  metric: |
+                    [[[
+                      const isOn = entity && entity.state === 'on';
+                      if (isOn) {
+                        const live = states['sensor.lilly_pilly_session_used'];
+                        if (live && live.state && live.state !== 'unknown')
+                          return parseFloat(live.state).toFixed(1) + ' L';
+                      }
+                      const s = states['sensor.lilly_pilly_last_run_liters'];
+                      return (s && s.state && s.state !== 'unknown' && s.state !== 'unavailable')
+                        ? s.state + ' L' : '— L';
+                    ]]]
+                  sub: |
+                    [[[
+                      const isOn = entity && entity.state === 'on';
+                      if (isOn) {
+                        const flow = states['sensor.lilly_pilly_flow'];
+                        const remL = states['sensor.lilly_pilly_remaining_liters'];
+                        const flowStr = (flow && flow.state && flow.state !== 'unknown')
+                          ? parseFloat(flow.state).toFixed(2) + ' L/min' : '—';
+                        const remStr = (remL && remL.state && remL.state !== 'unknown')
+                          ? ' · ' + parseFloat(remL.state).toFixed(1) + ' L left'
+                          : '';
+                        return '🔵 ' + flowStr + remStr + ' · TAP TO STOP';
+                      }
+                      const at = states['sensor.lilly_pilly_last_run_at'];
+                      if (!at || !at.state || at.state === 'unknown' || at.state === 'unavailable')
+                        return 'No history yet';
+                      const d = new Date(at.state);
+                      if (isNaN(d.getTime())) return at.state;
+                      return 'Last run ' + d.toLocaleString(undefined,
+                        { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                    ]]]
+
+              - type: custom:button-card
+                template: z2m_zone_tile
+                entity: switch.back_garden_valve
+                tap_action:
+                  action: call-service
+                  service: |
+                    [[[ return entity && entity.state === 'on'
+                          ? 'switch.turn_off'
+                          : 'homeassistant.update_entity'; ]]]
+                  target:
+                    entity_id: switch.back_garden_valve
+                  confirmation:
+                    text: |
+                      [[[ return entity && entity.state === 'on'
+                            ? 'Stop Back Garden now?'
+                            : null; ]]]
+                custom_fields:
+                  name: Back Garden
+                  status: |
+                    [[[ return entity && entity.state === 'on' ? 'RUNNING' : 'closed'; ]]]
+                  metric: |
+                    [[[
+                      const isOn = entity && entity.state === 'on';
+                      if (isOn) {
+                        const live = states['sensor.back_garden_session_used'];
+                        if (live && live.state && live.state !== 'unknown')
+                          return parseFloat(live.state).toFixed(1) + ' L';
+                      }
+                      const s = states['sensor.back_garden_last_run_liters'];
+                      return (s && s.state && s.state !== 'unknown' && s.state !== 'unavailable')
+                        ? s.state + ' L' : '— L';
+                    ]]]
+                  sub: |
+                    [[[
+                      const isOn = entity && entity.state === 'on';
+                      if (isOn) {
+                        const flow = states['sensor.back_garden_flow'];
+                        const remL = states['sensor.back_garden_remaining_liters'];
+                        const flowStr = (flow && flow.state && flow.state !== 'unknown')
+                          ? parseFloat(flow.state).toFixed(2) + ' L/min' : '—';
+                        const remStr = (remL && remL.state && remL.state !== 'unknown')
+                          ? ' · ' + parseFloat(remL.state).toFixed(1) + ' L left'
+                          : '';
+                        return '🔵 ' + flowStr + remStr + ' · TAP TO STOP';
+                      }
+                      const at = states['sensor.back_garden_last_run_at'];
+                      if (!at || !at.state || at.state === 'unknown' || at.state === 'unavailable')
+                        return 'No history yet';
+                      const d = new Date(at.state);
+                      if (isNaN(d.getTime())) return at.state;
+                      return 'Last run ' + d.toLocaleString(undefined,
+                        { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                    ]]]
+
+              - type: custom:button-card
+                template: z2m_zone_tile
+                entity: switch.mains_taps_valve
+                tap_action:
+                  action: call-service
+                  service: |
+                    [[[ return entity && entity.state === 'on'
+                          ? 'switch.turn_off'
+                          : 'homeassistant.update_entity'; ]]]
+                  target:
+                    entity_id: switch.mains_taps_valve
+                  confirmation:
+                    text: |
+                      [[[ return entity && entity.state === 'on'
+                            ? 'Stop Mains Taps now?'
+                            : null; ]]]
+                custom_fields:
+                  name: Mains Taps
+                  status: |
+                    [[[ return entity && entity.state === 'on' ? 'RUNNING' : 'closed'; ]]]
+                  metric: |
+                    [[[
+                      const isOn = entity && entity.state === 'on';
+                      if (isOn) {
+                        const live = states['sensor.mains_taps_session_used'];
+                        if (live && live.state && live.state !== 'unknown')
+                          return parseFloat(live.state).toFixed(1) + ' L';
+                      }
+                      const s = states['sensor.mains_taps_last_run_liters'];
+                      return (s && s.state && s.state !== 'unknown' && s.state !== 'unavailable')
+                        ? s.state + ' L' : '— L';
+                    ]]]
+                  sub: |
+                    [[[
+                      const isOn = entity && entity.state === 'on';
+                      if (isOn) {
+                        const flow = states['sensor.mains_taps_flow'];
+                        const remL = states['sensor.mains_taps_remaining_liters'];
+                        const flowStr = (flow && flow.state && flow.state !== 'unknown')
+                          ? parseFloat(flow.state).toFixed(2) + ' L/min' : '—';
+                        const remStr = (remL && remL.state && remL.state !== 'unknown')
+                          ? ' · ' + parseFloat(remL.state).toFixed(1) + ' L left'
+                          : '';
+                        return '🔵 ' + flowStr + remStr + ' · TAP TO STOP';
+                      }
+                      const at = states['sensor.mains_taps_last_run_at'];
+                      if (!at || !at.state || at.state === 'unknown' || at.state === 'unavailable')
+                        return 'No history yet';
+                      const d = new Date(at.state);
+                      if (isNaN(d.getTime())) return at.state;
+                      return 'Last run ' + d.toLocaleString(undefined,
+                        { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                    ]]]
+
+      # Section 4: Manual run — both volume and time sliders per zone (F-F)
+      #
+      # Per-zone layout: zone name heading, then two sliders side-by-side
+      # (volume L and time min), then a stop button row with one button
+      # per zone that's only shown when that zone is currently running
+      # (D8). Tap the slider to start a run, tap the stop button to
+      # interrupt it.
       - type: grid
         cards:
           - type: heading
@@ -382,25 +615,149 @@ views:
             heading_style: title
           - type: markdown
             content: |
-              Set a target volume on the slider beside any zone, and the
-              integration will publish a `cyclic_quantitative_irrigation`
-              command. The hardware closes itself at the target;
-              software guardrails kick in if anything goes wrong.
-          - type: custom:auto-entities
-            card:
-              type: grid
-              columns: 1
-              square: false
-            filter:
-              include:
-                - integration: z2m_irrigation
-                  domain: number
-                  entity_id: "number.*_run_for_liters"
-                  options:
-                    type: custom:mushroom-number-card
-                    display_mode: slider
-            sort:
-              method: friendly_name
+              Each zone has two sliders: **L** sends a fixed volume
+              (`cyclic_quantitative_irrigation`, hardware closes at target);
+              **min** sends a fixed duration (`cyclic_timed_irrigation`).
+              All software guardrails apply to both. Tap a slider to
+              commit. **Stop a run** by tapping the running tile above OR
+              the stop button below.
+
+          # Front Garden
+          - type: markdown
+            content: "##### Front Garden"
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-number-card
+                entity: number.front_garden_run_for_liters
+                display_mode: slider
+                name: Volume (L)
+              - type: custom:mushroom-number-card
+                entity: number.front_garden_run_for_minutes
+                display_mode: slider
+                name: Time (min)
+
+          # Lilly Pilly
+          - type: markdown
+            content: "##### Lilly Pilly"
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-number-card
+                entity: number.lilly_pilly_run_for_liters
+                display_mode: slider
+                name: Volume (L)
+              - type: custom:mushroom-number-card
+                entity: number.lilly_pilly_run_for_minutes
+                display_mode: slider
+                name: Time (min)
+
+          # Back Garden
+          - type: markdown
+            content: "##### Back Garden"
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-number-card
+                entity: number.back_garden_run_for_liters
+                display_mode: slider
+                name: Volume (L)
+              - type: custom:mushroom-number-card
+                entity: number.back_garden_run_for_minutes
+                display_mode: slider
+                name: Time (min)
+
+          # Mains Taps
+          - type: markdown
+            content: "##### Mains Taps"
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-number-card
+                entity: number.mains_taps_run_for_liters
+                display_mode: slider
+                name: Volume (L)
+              - type: custom:mushroom-number-card
+                entity: number.mains_taps_run_for_minutes
+                display_mode: slider
+                name: Time (min)
+
+          # Stop buttons — one per zone, all visible at all times for
+          # the simplest UX. Each calls switch.turn_off on the
+          # corresponding _valve entity. (Conditional cards that hide
+          # when the valve is off were considered, but always-visible
+          # is more discoverable and the confirmation dialog catches
+          # accidental taps.)
+          - type: markdown
+            content: "##### 🛑 Stop a running zone"
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: Front Garden
+                secondary: Stop
+                icon: mdi:stop-circle
+                icon_color: red
+                tap_action:
+                  action: call-service
+                  service: switch.turn_off
+                  target:
+                    entity_id: switch.front_garden_valve
+                  confirmation:
+                    text: Stop Front Garden valve now?
+              - type: custom:mushroom-template-card
+                primary: Lilly Pilly
+                secondary: Stop
+                icon: mdi:stop-circle
+                icon_color: red
+                tap_action:
+                  action: call-service
+                  service: switch.turn_off
+                  target:
+                    entity_id: switch.lilly_pilly_valve
+                  confirmation:
+                    text: Stop Lilly Pilly valve now?
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: Back Garden
+                secondary: Stop
+                icon: mdi:stop-circle
+                icon_color: red
+                tap_action:
+                  action: call-service
+                  service: switch.turn_off
+                  target:
+                    entity_id: switch.back_garden_valve
+                  confirmation:
+                    text: Stop Back Garden valve now?
+              - type: custom:mushroom-template-card
+                primary: Mains Taps
+                secondary: Stop
+                icon: mdi:stop-circle
+                icon_color: red
+                tap_action:
+                  action: call-service
+                  service: switch.turn_off
+                  target:
+                    entity_id: switch.mains_taps_valve
+                  confirmation:
+                    text: Stop Mains Taps valve now?
+
+          # Global "stop ALL running" — single button that calls
+          # switch.turn_off on all 4 valves at once. Useful as a
+          # panic-button alternative.
+          - type: custom:mushroom-template-card
+            primary: 🛑 STOP ALL RUNNING
+            secondary: Turn off all 4 valves immediately
+            icon: mdi:alert-octagon
+            icon_color: red
+            tap_action:
+              action: call-service
+              service: switch.turn_off
+              target:
+                entity_id:
+                  - switch.front_garden_valve
+                  - switch.lilly_pilly_valve
+                  - switch.back_garden_valve
+                  - switch.mains_taps_valve
+              confirmation:
+                text: Turn off ALL 4 valves immediately?
 
   # ───────────────────────────────────────────────────────────────────────
   # Tab 2 — Schedule
@@ -418,20 +775,20 @@ views:
           - type: markdown
             content: |
               ## Next scheduled run
-              {% set s = states('sensor.z2m_irrigation_next_run_summary') %}
+              {% set s = states('sensor.z2m_irrigation_next_run') %}
               {% if s == 'no_schedule' %}
               _No schedules yet. Use the **Create schedule** button below to add one._
               {% else %}
               {% set d = as_datetime(s) %}
               **{{ d.strftime('%A %d %b at %H:%M') if d else s }}** —
-              **{{ state_attr('sensor.z2m_irrigation_next_run_summary', 'schedule_name') }}**
-              ({{ state_attr('sensor.z2m_irrigation_next_run_summary', 'mode') }} mode,
-              {{ state_attr('sensor.z2m_irrigation_next_run_summary', 'zones') | length }} zones,
-              ~{{ state_attr('sensor.z2m_irrigation_next_run_summary', 'estimated_total_liters') }} L estimated)
+              **{{ state_attr('sensor.z2m_irrigation_next_run', 'schedule_name') }}**
+              ({{ state_attr('sensor.z2m_irrigation_next_run', 'mode') }} mode,
+              {{ state_attr('sensor.z2m_irrigation_next_run', 'zones') | length }} zones,
+              ~{{ state_attr('sensor.z2m_irrigation_next_run', 'estimated_total_liters') }} L estimated)
               {% endif %}
 
               ---
-              {% set q = state_attr('sensor.z2m_irrigation_next_run_summary', 'queue') or [] %}
+              {% set q = state_attr('sensor.z2m_irrigation_next_run', 'queue') or [] %}
               {% if q | length > 0 %}
               **Queue (in flight):**
               {% for item in q %}
@@ -451,37 +808,38 @@ views:
             content: |
               **{{ states('sensor.z2m_irrigation_schedules') }}** enabled
               of **{{ state_attr('sensor.z2m_irrigation_schedules', 'total') }}** total.
-          - type: custom:auto-entities
-            card:
-              type: vertical-stack
-            filter:
-              template: |
-                {% for s in state_attr('sensor.z2m_irrigation_schedules', 'schedules') or [] %}
-                  {{
-                    {
-                      'type': 'custom:mushroom-template-card',
-                      'primary': s.name + (' (disabled)' if not s.enabled else ''),
-                      'secondary': s.time + ' · ' +
-                                   (s.days | join(',') if s.days else 'every day') + ' · ' +
-                                   s.mode + ' · ' +
-                                   (s.zones | length | string) + ' zones' +
-                                   (' · last: ' + (s.last_run_outcome or 'never') if s.last_run_at else ''),
-                      'icon': 'mdi:calendar-clock' if s.enabled else 'mdi:calendar-remove',
-                      'icon_color': 'teal' if s.enabled else 'grey',
-                      'tap_action': {
-                        'action': 'call-service',
-                        'service': 'z2m_irrigation.run_schedule_now',
-                        'data': { 'schedule_id': s.id },
-                        'confirmation': { 'text': 'Force-run schedule "' + s.name + '" now?' }
-                      },
-                      'hold_action': {
-                        'action': 'call-service',
-                        'service': ('z2m_irrigation.disable_schedule' if s.enabled else 'z2m_irrigation.enable_schedule'),
-                        'data': { 'schedule_id': s.id }
-                      }
-                    }
-                  }},
-                {% endfor %}
+          # v4.0 rc-2 hotfix — was using auto-entities with a Jinja
+          # template to emit one card per schedule, but auto-entities
+          # crashes the inner vertical-stack with "Invalid configuration"
+          # when the template emits zero items. The for-loop with empty
+          # input produces a malformed sequence that the inner stack
+          # can't parse.
+          #
+          # New pattern: a single markdown card that renders the
+          # schedule list as a table via Jinja, with an explicit
+          # empty-state branch. No auto-entities, no inner stack, no
+          # empty-array path. Loses the per-row tap-to-run / hold-to-
+          # toggle controls — those move to the global control row
+          # below the table. Less elegant but bulletproof.
+          - type: markdown
+            content: |
+              {% set schedules = state_attr('sensor.z2m_irrigation_schedules', 'schedules') or [] %}
+              {% if schedules | count == 0 %}
+              _No schedules yet — scroll down to create your first one with the editor below._
+              {% else %}
+              | | Name | Time | Days | Mode | Zones | Last outcome |
+              | --- | --- | --- | --- | --- | ---: | --- |
+              {% for s in schedules -%}
+              | {{ '✅' if s.enabled else '⏸️' }} | **{{ s.name }}** | `{{ s.time }}` | {{ s.days | join(',') if s.days else 'every day' }} | {{ s.mode }} | {{ s.zones | count }} | {{ s.last_run_outcome or '—' }} |
+              {% endfor %}
+
+              ---
+
+              **Run a schedule** by calling `z2m_irrigation.run_schedule_now`
+              with the `schedule_id` from Developer Tools → Services.
+              Tap-to-run / hold-to-toggle returns in v4.1 with a custom
+              JS card.
+              {% endif %}
 
       # Section: In-dashboard schedule editor (rc-1+)
       - type: grid
@@ -549,42 +907,754 @@ views:
               - entity: sensor.z2m_irrigation_daily_totals
                 name: 30-day total
 
-      # Section: Per-zone config — auto-generated rows
+      # Section: Per-zone calculator config (F-A → simplified per F-H)
+      #
+      # OPTION C from V4_DEPLOY_TRACKER.md F-H:
+      #   - Main editor shows ONLY the `factor` ➖➕ knob per zone — the
+      #     daily-driver "more/less water" control. Each row also shows
+      #     the LIVE calculator result for that zone (in litres) right
+      #     next to the knob, so the user immediately sees how their
+      #     tap affected the day's output.
+      #   - The calibration knobs (`l_per_mm` = zone area, `base_mm` =
+      #     water demand per day) are moved to a separate "Advanced
+      #     calibration" section at the very bottom of the Setup tab.
+      #     Always visible (HA Lovelace has no native collapsible cards
+      #     and the user has no `input_boolean.show_advanced` helper) but
+      #     visually subordinated under a clear heading + intro markdown
+      #     explaining they're set-once values.
+      #
+      # See F-H in V4_DEPLOY_TRACKER.md for the rationale.
       - type: grid
         cards:
           - type: heading
-            heading: Per-zone config
+            heading: Per-zone calculator config
             heading_style: title
           - type: markdown
             content: |
-              Each zone's calculator inputs live in the integration's
-              JSON store and persist across HA restarts. Edit via:
+              **What each value does:**
 
-              - **z2m_irrigation.set_zone_factor** — multiplier (default 1.0)
-              - **z2m_irrigation.set_zone_l_per_mm** — calibration (default 12.0)
-              - **z2m_irrigation.set_zone_base_mm** — base mm/day (default 4.0)
-              - **z2m_irrigation.set_zone_in_smart_cycle** — include in smart runs
-              - **z2m_irrigation.set_zone_skip_thresholds** — per-zone overrides
-              - **z2m_irrigation.reset_zone_to_defaults** — wipe back to defaults
-          - type: custom:auto-entities
-            card:
-              type: vertical-stack
-            filter:
-              include:
-                - integration: z2m_irrigation
-                  domain: binary_sensor
-                  entity_id: "binary_sensor.*_in_smart_cycle"
-                  options:
-                    type: entities
-                    title: this.attributes.friendly_name
-                    state_color: true
-            sort:
-              method: friendly_name
+              - **factor** — overall multiplier on this zone's output
+                (1.0 = default, 1.5 = give it 50% more, 0.7 = give it
+                30% less). Use this for the simple "more/less water
+                here" knob.
+              - **l/mm** — calibration: how many litres = 1 mm of
+                irrigation depth for this zone. Default 12. Lower if
+                this zone has dense coverage; higher if sparse.
+              - **base mm** — baseline daily depth this zone wants.
+                Default 4 mm/day. The calculator multiplies this by
+                dryness, then subtracts rain, to get `need_mm`.
+
+              **Smart cycle membership** — uncheck a zone here to
+              exclude it from smart-cycle runs (it stays manually
+              runnable).
+
+      # Smart cycle membership toggle (rendered as entities card)
+      - type: grid
+        cards:
+          - type: entities
+            title: Smart cycle membership
+            state_color: true
+            entities:
+              - entity: binary_sensor.front_garden_in_smart_cycle
+                name: Front Garden
+              - entity: binary_sensor.lilly_pilly_in_smart_cycle
+                name: Lilly Pilly
+              - entity: binary_sensor.back_garden_in_smart_cycle
+                name: Back Garden
+              - entity: binary_sensor.mains_taps_in_smart_cycle
+                name: Mains Taps
+
+      # ────── Per-zone factor knob (the daily-driver) ──────
+      #
+      # One row per zone showing: zone name + LIVE liters from current
+      # calculator result + factor value + ➖ ➕ buttons (step 0.05).
+      # Each tap immediately fires set_zone_factor which triggers a
+      # calculator refresh, so the live liters value updates within
+      # ~1s of the tap.
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Per-zone water tweak
+            heading_style: title
           - type: markdown
             content: |
-              **Tip:** the per-zone sensors (`zone_factor`, `zone_l_per_mm`,
-              `zone_base_mm`, `last_run_liters`, `avg_flow_7d`) appear under
-              each valve's device card in Settings → Devices & Services.
+              **Tap ➕ to give a zone more water, ➖ for less.** The live
+              "today" value next to each zone updates immediately so
+              you can see exactly how the change affected the day's
+              calculation.
+
+              Step is **0.05** per tap (5% per click). Range is
+              **0.5 ↔ 3.0** (50% less ↔ 200% more). Use the **Reset**
+              button at the bottom of each row to snap back to 1.00.
+
+      # Front Garden — factor row
+      - type: grid
+        cards:
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: Front Garden
+                secondary: |
+                  {% set zones = state_attr('sensor.z2m_irrigation_today_calculation', 'zones') or [] %}
+                  {% set z = zones | selectattr('zone', 'equalto', 'Front Garden') | list | first | default(none) %}
+                  {% if z %}
+                    {{ z.liters }} L today · need {{ z.need_mm }} mm
+                  {% else %}
+                    — L (calc unavailable)
+                  {% endif %}
+                icon: mdi:tree
+                icon_color: green
+                multiline_secondary: false
+              - type: custom:mushroom-template-card
+                primary: |
+                  {{ states('sensor.front_garden_zone_factor') }}
+                secondary: factor
+                icon: mdi:tune-variant
+                icon_color: teal
+              - type: custom:button-card
+                show_name: true
+                show_icon: true
+                name: "−"
+                icon: mdi:minus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_factor
+                  data:
+                    zone: Front Garden
+                    factor: |
+                      [[[
+                        const cur = parseFloat(states['sensor.front_garden_zone_factor'].state) || 1.0;
+                        return Math.max(0.5, Math.round((cur - 0.05) * 100) / 100);
+                      ]]]
+              - type: custom:button-card
+                show_name: true
+                show_icon: true
+                name: "+"
+                icon: mdi:plus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_factor
+                  data:
+                    zone: Front Garden
+                    factor: |
+                      [[[
+                        const cur = parseFloat(states['sensor.front_garden_zone_factor'].state) || 1.0;
+                        return Math.min(3.0, Math.round((cur + 0.05) * 100) / 100);
+                      ]]]
+
+      # Lilly Pilly — factor row
+      - type: grid
+        cards:
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: Lilly Pilly
+                secondary: |
+                  {% set zones = state_attr('sensor.z2m_irrigation_today_calculation', 'zones') or [] %}
+                  {% set z = zones | selectattr('zone', 'equalto', 'Lilly Pilly') | list | first | default(none) %}
+                  {% if z %}
+                    {{ z.liters }} L today · need {{ z.need_mm }} mm
+                  {% else %}
+                    — L (calc unavailable)
+                  {% endif %}
+                icon: mdi:flower
+                icon_color: pink
+              - type: custom:mushroom-template-card
+                primary: |
+                  {{ states('sensor.lilly_pilly_zone_factor') }}
+                secondary: factor
+                icon: mdi:tune-variant
+                icon_color: teal
+              - type: custom:button-card
+                show_name: true
+                show_icon: true
+                name: "−"
+                icon: mdi:minus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_factor
+                  data:
+                    zone: Lilly Pilly
+                    factor: |
+                      [[[
+                        const cur = parseFloat(states['sensor.lilly_pilly_zone_factor'].state) || 1.0;
+                        return Math.max(0.5, Math.round((cur - 0.05) * 100) / 100);
+                      ]]]
+              - type: custom:button-card
+                show_name: true
+                show_icon: true
+                name: "+"
+                icon: mdi:plus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_factor
+                  data:
+                    zone: Lilly Pilly
+                    factor: |
+                      [[[
+                        const cur = parseFloat(states['sensor.lilly_pilly_zone_factor'].state) || 1.0;
+                        return Math.min(3.0, Math.round((cur + 0.05) * 100) / 100);
+                      ]]]
+
+      # Back Garden — factor row
+      - type: grid
+        cards:
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: Back Garden
+                secondary: |
+                  {% set zones = state_attr('sensor.z2m_irrigation_today_calculation', 'zones') or [] %}
+                  {% set z = zones | selectattr('zone', 'equalto', 'Back Garden') | list | first | default(none) %}
+                  {% if z %}
+                    {{ z.liters }} L today · need {{ z.need_mm }} mm
+                  {% else %}
+                    — L (calc unavailable)
+                  {% endif %}
+                icon: mdi:grass
+                icon_color: green
+              - type: custom:mushroom-template-card
+                primary: |
+                  {{ states('sensor.back_garden_zone_factor') }}
+                secondary: factor
+                icon: mdi:tune-variant
+                icon_color: teal
+              - type: custom:button-card
+                show_name: true
+                show_icon: true
+                name: "−"
+                icon: mdi:minus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_factor
+                  data:
+                    zone: Back Garden
+                    factor: |
+                      [[[
+                        const cur = parseFloat(states['sensor.back_garden_zone_factor'].state) || 1.0;
+                        return Math.max(0.5, Math.round((cur - 0.05) * 100) / 100);
+                      ]]]
+              - type: custom:button-card
+                show_name: true
+                show_icon: true
+                name: "+"
+                icon: mdi:plus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_factor
+                  data:
+                    zone: Back Garden
+                    factor: |
+                      [[[
+                        const cur = parseFloat(states['sensor.back_garden_zone_factor'].state) || 1.0;
+                        return Math.min(3.0, Math.round((cur + 0.05) * 100) / 100);
+                      ]]]
+
+      # Mains Taps — factor row
+      - type: grid
+        cards:
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: Mains Taps
+                secondary: |
+                  {% set zones = state_attr('sensor.z2m_irrigation_today_calculation', 'zones') or [] %}
+                  {% set z = zones | selectattr('zone', 'equalto', 'Mains Taps') | list | first | default(none) %}
+                  {% if z %}
+                    {{ z.liters }} L today · need {{ z.need_mm }} mm
+                  {% else %}
+                    — L (calc unavailable)
+                  {% endif %}
+                icon: mdi:water-pump
+                icon_color: blue
+              - type: custom:mushroom-template-card
+                primary: |
+                  {{ states('sensor.mains_taps_zone_factor') }}
+                secondary: factor
+                icon: mdi:tune-variant
+                icon_color: teal
+              - type: custom:button-card
+                show_name: true
+                show_icon: true
+                name: "−"
+                icon: mdi:minus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_factor
+                  data:
+                    zone: Mains Taps
+                    factor: |
+                      [[[
+                        const cur = parseFloat(states['sensor.mains_taps_zone_factor'].state) || 1.0;
+                        return Math.max(0.5, Math.round((cur - 0.05) * 100) / 100);
+                      ]]]
+              - type: custom:button-card
+                show_name: true
+                show_icon: true
+                name: "+"
+                icon: mdi:plus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_factor
+                  data:
+                    zone: Mains Taps
+                    factor: |
+                      [[[
+                        const cur = parseFloat(states['sensor.mains_taps_zone_factor'].state) || 1.0;
+                        return Math.min(3.0, Math.round((cur + 0.05) * 100) / 100);
+                      ]]]
+
+      # Reset all factors row
+      - type: grid
+        cards:
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: Reset Front Garden
+                secondary: factor → 1.00
+                icon: mdi:restore
+                icon_color: grey
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_factor
+                  data:
+                    zone: Front Garden
+                    factor: 1.0
+              - type: custom:mushroom-template-card
+                primary: Reset Lilly Pilly
+                secondary: factor → 1.00
+                icon: mdi:restore
+                icon_color: grey
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_factor
+                  data:
+                    zone: Lilly Pilly
+                    factor: 1.0
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: Reset Back Garden
+                secondary: factor → 1.00
+                icon: mdi:restore
+                icon_color: grey
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_factor
+                  data:
+                    zone: Back Garden
+                    factor: 1.0
+              - type: custom:mushroom-template-card
+                primary: Reset Mains Taps
+                secondary: factor → 1.00
+                icon: mdi:restore
+                icon_color: grey
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_factor
+                  data:
+                    zone: Mains Taps
+                    factor: 1.0
+
+      # ────── Advanced calibration section ──────
+      #
+      # Always visible (HA Lovelace has no native collapsible cards
+      # without extra resources), but visually subordinated under a
+      # clear "set once during initial setup" heading + intro markdown.
+      # The user should rarely need to touch these after their first
+      # bucket test / measurement.
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: 📐 Advanced calibration (set once during setup)
+            heading_style: title
+          - type: markdown
+            content: |
+              **You usually only set these ONCE per zone, then forget
+              about them.** They define the zone's geometry and plant
+              biology — the daily "more/less" tweak goes through the
+              `factor` knob above instead.
+
+              - **L per mm** is your zone's effective irrigation area
+                in m² (since 1 mm of water on 1 m² = 1 L exactly).
+                Measure or bucket-test to set. Default 12 = 12 m².
+              - **Base mm/day** is the plant water demand for what
+                you're growing. Lawn ≈ 4 mm, vegetable garden ≈ 6 mm,
+                succulents ≈ 1 mm. Default 4.
+
+              The calculator multiplies these together with the dryness
+              factor and your `factor` knob to get the final daily
+              litres. Use the `factor` knob above for daily tweaks.
+
+      # Advanced — Front Garden calibration
+      - type: grid
+        cards:
+          - type: heading
+            heading: Front Garden — calibration
+            heading_style: subtitle
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: |
+                  {{ states('sensor.front_garden_zone_l_per_mm') }}
+                secondary: L per mm (≈ area m²)
+                icon: mdi:water-percent
+                icon_color: blue
+              - type: custom:button-card
+                name: "−"
+                icon: mdi:minus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_l_per_mm
+                  data:
+                    zone: Front Garden
+                    l_per_mm: |
+                      [[[
+                        const cur = parseFloat(states['sensor.front_garden_zone_l_per_mm'].state) || 12.0;
+                        return Math.max(1.0, Math.round((cur - 0.5) * 10) / 10);
+                      ]]]
+              - type: custom:button-card
+                name: "+"
+                icon: mdi:plus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_l_per_mm
+                  data:
+                    zone: Front Garden
+                    l_per_mm: |
+                      [[[
+                        const cur = parseFloat(states['sensor.front_garden_zone_l_per_mm'].state) || 12.0;
+                        return Math.min(50.0, Math.round((cur + 0.5) * 10) / 10);
+                      ]]]
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: |
+                  {{ states('sensor.front_garden_zone_base_mm') }}
+                secondary: base mm/day
+                icon: mdi:waves-arrow-up
+                icon_color: indigo
+              - type: custom:button-card
+                name: "−"
+                icon: mdi:minus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_base_mm
+                  data:
+                    zone: Front Garden
+                    base_mm: |
+                      [[[
+                        const cur = parseFloat(states['sensor.front_garden_zone_base_mm'].state) || 4.0;
+                        return Math.max(0.5, Math.round((cur - 0.5) * 10) / 10);
+                      ]]]
+              - type: custom:button-card
+                name: "+"
+                icon: mdi:plus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_base_mm
+                  data:
+                    zone: Front Garden
+                    base_mm: |
+                      [[[
+                        const cur = parseFloat(states['sensor.front_garden_zone_base_mm'].state) || 4.0;
+                        return Math.min(15.0, Math.round((cur + 0.5) * 10) / 10);
+                      ]]]
+
+      # Advanced — Lilly Pilly calibration
+      - type: grid
+        cards:
+          - type: heading
+            heading: Lilly Pilly — calibration
+            heading_style: subtitle
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: |
+                  {{ states('sensor.lilly_pilly_zone_l_per_mm') }}
+                secondary: L per mm (≈ area m²)
+                icon: mdi:water-percent
+                icon_color: blue
+              - type: custom:button-card
+                name: "−"
+                icon: mdi:minus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_l_per_mm
+                  data:
+                    zone: Lilly Pilly
+                    l_per_mm: |
+                      [[[
+                        const cur = parseFloat(states['sensor.lilly_pilly_zone_l_per_mm'].state) || 12.0;
+                        return Math.max(1.0, Math.round((cur - 0.5) * 10) / 10);
+                      ]]]
+              - type: custom:button-card
+                name: "+"
+                icon: mdi:plus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_l_per_mm
+                  data:
+                    zone: Lilly Pilly
+                    l_per_mm: |
+                      [[[
+                        const cur = parseFloat(states['sensor.lilly_pilly_zone_l_per_mm'].state) || 12.0;
+                        return Math.min(50.0, Math.round((cur + 0.5) * 10) / 10);
+                      ]]]
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: |
+                  {{ states('sensor.lilly_pilly_zone_base_mm') }}
+                secondary: base mm/day
+                icon: mdi:waves-arrow-up
+                icon_color: indigo
+              - type: custom:button-card
+                name: "−"
+                icon: mdi:minus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_base_mm
+                  data:
+                    zone: Lilly Pilly
+                    base_mm: |
+                      [[[
+                        const cur = parseFloat(states['sensor.lilly_pilly_zone_base_mm'].state) || 4.0;
+                        return Math.max(0.5, Math.round((cur - 0.5) * 10) / 10);
+                      ]]]
+              - type: custom:button-card
+                name: "+"
+                icon: mdi:plus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_base_mm
+                  data:
+                    zone: Lilly Pilly
+                    base_mm: |
+                      [[[
+                        const cur = parseFloat(states['sensor.lilly_pilly_zone_base_mm'].state) || 4.0;
+                        return Math.min(15.0, Math.round((cur + 0.5) * 10) / 10);
+                      ]]]
+
+      # Advanced — Back Garden calibration
+      - type: grid
+        cards:
+          - type: heading
+            heading: Back Garden — calibration
+            heading_style: subtitle
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: |
+                  {{ states('sensor.back_garden_zone_l_per_mm') }}
+                secondary: L per mm (≈ area m²)
+                icon: mdi:water-percent
+                icon_color: blue
+              - type: custom:button-card
+                name: "−"
+                icon: mdi:minus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_l_per_mm
+                  data:
+                    zone: Back Garden
+                    l_per_mm: |
+                      [[[
+                        const cur = parseFloat(states['sensor.back_garden_zone_l_per_mm'].state) || 12.0;
+                        return Math.max(1.0, Math.round((cur - 0.5) * 10) / 10);
+                      ]]]
+              - type: custom:button-card
+                name: "+"
+                icon: mdi:plus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_l_per_mm
+                  data:
+                    zone: Back Garden
+                    l_per_mm: |
+                      [[[
+                        const cur = parseFloat(states['sensor.back_garden_zone_l_per_mm'].state) || 12.0;
+                        return Math.min(50.0, Math.round((cur + 0.5) * 10) / 10);
+                      ]]]
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: |
+                  {{ states('sensor.back_garden_zone_base_mm') }}
+                secondary: base mm/day
+                icon: mdi:waves-arrow-up
+                icon_color: indigo
+              - type: custom:button-card
+                name: "−"
+                icon: mdi:minus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_base_mm
+                  data:
+                    zone: Back Garden
+                    base_mm: |
+                      [[[
+                        const cur = parseFloat(states['sensor.back_garden_zone_base_mm'].state) || 4.0;
+                        return Math.max(0.5, Math.round((cur - 0.5) * 10) / 10);
+                      ]]]
+              - type: custom:button-card
+                name: "+"
+                icon: mdi:plus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_base_mm
+                  data:
+                    zone: Back Garden
+                    base_mm: |
+                      [[[
+                        const cur = parseFloat(states['sensor.back_garden_zone_base_mm'].state) || 4.0;
+                        return Math.min(15.0, Math.round((cur + 0.5) * 10) / 10);
+                      ]]]
+
+      # Advanced — Mains Taps calibration
+      - type: grid
+        cards:
+          - type: heading
+            heading: Mains Taps — calibration
+            heading_style: subtitle
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: |
+                  {{ states('sensor.mains_taps_zone_l_per_mm') }}
+                secondary: L per mm (≈ area m²)
+                icon: mdi:water-percent
+                icon_color: blue
+              - type: custom:button-card
+                name: "−"
+                icon: mdi:minus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_l_per_mm
+                  data:
+                    zone: Mains Taps
+                    l_per_mm: |
+                      [[[
+                        const cur = parseFloat(states['sensor.mains_taps_zone_l_per_mm'].state) || 12.0;
+                        return Math.max(1.0, Math.round((cur - 0.5) * 10) / 10);
+                      ]]]
+              - type: custom:button-card
+                name: "+"
+                icon: mdi:plus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_l_per_mm
+                  data:
+                    zone: Mains Taps
+                    l_per_mm: |
+                      [[[
+                        const cur = parseFloat(states['sensor.mains_taps_zone_l_per_mm'].state) || 12.0;
+                        return Math.min(50.0, Math.round((cur + 0.5) * 10) / 10);
+                      ]]]
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: |
+                  {{ states('sensor.mains_taps_zone_base_mm') }}
+                secondary: base mm/day
+                icon: mdi:waves-arrow-up
+                icon_color: indigo
+              - type: custom:button-card
+                name: "−"
+                icon: mdi:minus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_base_mm
+                  data:
+                    zone: Mains Taps
+                    base_mm: |
+                      [[[
+                        const cur = parseFloat(states['sensor.mains_taps_zone_base_mm'].state) || 4.0;
+                        return Math.max(0.5, Math.round((cur - 0.5) * 10) / 10);
+                      ]]]
+              - type: custom:button-card
+                name: "+"
+                icon: mdi:plus
+                styles:
+                  card: [{padding: 12px}, {min-height: 60px}]
+                tap_action:
+                  action: call-service
+                  service: z2m_irrigation.set_zone_base_mm
+                  data:
+                    zone: Mains Taps
+                    base_mm: |
+                      [[[
+                        const cur = parseFloat(states['sensor.mains_taps_zone_base_mm'].state) || 4.0;
+                        return Math.min(15.0, Math.round((cur + 0.5) * 10) / 10);
+                      ]]]
+
+      # Reset all calibration to defaults — single button
+      - type: grid
+        cards:
+          - type: custom:mushroom-template-card
+            primary: 🔄 Reset ALL zones to defaults
+            secondary: factor 1.0 · L/mm 12 · base mm 4
+            icon: mdi:restore-alert
+            icon_color: red
+            tap_action:
+              action: call-service
+              service: z2m_irrigation.reset_zone_to_defaults
+              data:
+                zone: Front Garden
+              confirmation:
+                text: |
+                  Reset Front Garden's calibration AND factor to defaults?
+                  (To reset all 4 zones, tap each Reset button individually
+                  or use the per-zone Reset rows above.)
+
 
       # Section: Integration config (read-only summary)
       - type: grid
@@ -713,47 +1783,29 @@ views:
           - type: heading
             heading: Per-zone trend
             heading_style: title
-          - type: custom:auto-entities
-            card:
-              type: vertical-stack
-            filter:
-              include:
-                - integration: z2m_irrigation
-                  domain: sensor
-                  entity_id: "sensor.*_daily_history"
-                  options:
-                    type: custom:apexcharts-card
-                    graph_span: 30d
-                    span:
-                      end: day
-                    header:
-                      show: true
-                      title: this.attributes.friendly_name
-                    apex_config:
-                      chart:
-                        type: bar
-                        height: 180
-                      plotOptions:
-                        bar:
-                          borderRadius: 3
-                          columnWidth: 60%
-                      dataLabels:
-                        enabled: false
-                      legend:
-                        show: false
-                      xaxis:
-                        type: datetime
-                    series:
-                      - entity: this.entity_id
-                        color: "#4a90e2"
-                        data_generator: |
-                          const days = entity.attributes.days || [];
-                          return days.slice().reverse().map(d => [
-                            new Date(d.date + 'T00:00:00').getTime(),
-                            d.liters
-                          ]);
-            sort:
-              method: friendly_name
+          # v4.0 rc-2 hotfix — the previous version used auto-entities to
+          # generate one apexcharts-card per discovered valve via a
+          # `series.entity: this.entity_id` placeholder. Auto-entities
+          # substitutes top-level `entity:` placeholders cleanly but
+          # does NOT reliably walk into nested `series:` arrays, so the
+          # render path crashed with "card vertical-stack Error: Invalid
+          # configuration". The combined daily chart at the top of
+          # this tab + the leaderboard table above cover most of the
+          # value; per-zone trend bars are deferred to v4.1 where I'll
+          # ship a smarter pattern (likely a single multi-series chart
+          # whose series are populated dynamically from
+          # `daily_totals.attributes.zones`).
+          - type: markdown
+            content: |
+              **Per-zone trend bars** are deferred to v4.1.
+
+              Until then, the **30-day delivery** chart at the top of
+              this tab shows the combined trend across all zones, and
+              the **leaderboard table** above shows per-zone totals
+              over the same window. For a per-zone time-series view,
+              open Developer Tools → Statistics and pick any
+              `sensor.<zone>_daily_history` (the `days` attribute
+              carries the same data shape).
 
       # Section: Schedule timeline — last 14 days of fires/skips
       - type: grid
@@ -796,15 +1848,71 @@ views:
               Rolling average flow rate over the most recent completed
               sessions. A drifting value over time signals filter clog,
               valve wear, or pressure changes.
-          - type: custom:auto-entities
-            card:
-              type: glance
-              show_state: true
-              show_name: true
-            filter:
-              include:
-                - integration: z2m_irrigation
-                  domain: sensor
-                  entity_id: "sensor.*_avg_flow_7d"
-            sort:
-              method: friendly_name
+          # v4.0 rc-2 hotfix — hardcoded list (same auto-entities
+          # reliability rationale as the other sections).
+          - type: glance
+            show_state: true
+            show_name: true
+            entities:
+              - entity: sensor.front_garden_avg_flow_7d
+                name: Front Garden
+              - entity: sensor.lilly_pilly_avg_flow_7d
+                name: Lilly Pilly
+              - entity: sensor.back_garden_avg_flow_7d
+                name: Back Garden
+              - entity: sensor.mains_taps_avg_flow_7d
+                name: Mains Taps
+
+  # ───────────────────────────────────────────────────────────────────────
+  # Tab 5 — Log (v4.0-rc-3, F-I)
+  #
+  # Renders `sensor.z2m_irrigation_session_log.attributes.sessions` as a
+  # markdown table. Reads the most recent 200 sessions from the SQLite
+  # session history. No recorder access needed.
+  # ───────────────────────────────────────────────────────────────────────
+  - title: Log
+    path: log
+    icon: mdi:format-list-bulleted
+    type: sections
+    max_columns: 1
+    sections:
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Session log
+            heading_style: title
+          - type: markdown
+            content: |
+              Recent irrigation sessions (most recent first). Sourced
+              directly from the integration's SQLite session history,
+              capped at 200 entries. Each row shows when the session
+              ran, what triggered it, the target parameter that was
+              set, and the final delivered values when the valve closed.
+
+              {% set sessions = state_attr('sensor.z2m_irrigation_session_log', 'sessions') or [] %}
+              {% if sessions | count == 0 %}
+              _No sessions recorded yet._
+              {% else %}
+              **{{ sessions | count }}** sessions in the buffer.
+
+              | When | Zone | Trigger | Target | Delivered | Duration | Avg flow | OK |
+              | --- | --- | --- | ---: | ---: | ---: | ---: | :---: |
+              {% for s in sessions[:50] -%}
+              {%- set ended = as_datetime(s.ended_at) if s.ended_at else None -%}
+              {%- set when = ended.strftime('%a %d %b %H:%M') if ended else (s.ended_at or '?') -%}
+              {%- set trig = s.trigger_type or '?' -%}
+              {%- set target = '' -%}
+              {%- if s.target_liters %}{% set target = (s.target_liters | round(1)) ~ ' L' %}
+              {%- elif s.target_minutes %}{% set target = (s.target_minutes | round(1)) ~ ' min' %}
+              {%- else %}{% set target = '—' %}
+              {%- endif %}
+              {%- set delivered = (s.volume_liters | round(2)) ~ ' L' if s.volume_liters is not none else '—' -%}
+              {%- set duration = (s.duration_minutes | round(1)) ~ ' min' if s.duration_minutes is not none else '—' -%}
+              {%- set flow = (s.avg_flow_lpm | round(2)) ~ ' L/min' if s.avg_flow_lpm is not none else '—' -%}
+              {%- set ok = '✅' if s.completed_successfully else '⚠' -%}
+              | {{ when }} | {{ s.name or s.valve }} | {{ trig }} | {{ target }} | {{ delivered }} | {{ duration }} | {{ flow }} | {{ ok }} |
+              {% endfor %}
+
+              Showing the most recent **{{ [sessions | count, 50] | min }}** of **{{ sessions | count }}** entries. Buffer cap is 200.
+              {% endif %}

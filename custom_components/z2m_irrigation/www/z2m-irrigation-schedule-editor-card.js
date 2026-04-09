@@ -33,7 +33,7 @@
  * resource entry required.
  */
 
-const CARD_VERSION = "4.0.0rc1";
+const CARD_VERSION = "4.0.0rc3";
 const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const MODES = [
   { value: "smart", label: "Smart (calculator)" },
@@ -67,13 +67,24 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
 
   set hass(hass) {
     const firstHass = !this._hass;
+    const prevSchedules = this._schedulesCache;
     this._hass = hass;
+
     // Refresh discovered zones whenever the entity registry changes.
     // Cheap — just iterates hass.states once and bails if unchanged.
     const zones = this._discoverZones();
     const zonesChanged = JSON.stringify(zones) !== JSON.stringify(this._zonesCache);
+
+    // v4.0-rc-3 (F-J): also re-render when the existing schedules list
+    // changes (after a CREATE / UPDATE / DELETE service call lands).
+    const schedules = this._existingSchedules();
+    this._schedulesCache = schedules;
+    const schedulesChanged = JSON.stringify(schedules) !== JSON.stringify(prevSchedules);
+
     if (zonesChanged) {
       this._zonesCache = zones;
+      this._render();
+    } else if (schedulesChanged) {
       this._render();
     } else if (firstHass) {
       this._render();
@@ -98,6 +109,10 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
 
   _resetForm() {
     this._form = {
+      // v4.0-rc-3 (F-J): editing_id is null in CREATE mode and set to a
+      // schedule_id string in EDIT mode. Submit routes to either
+      // create_schedule or update_schedule based on this flag.
+      editing_id: null,
       name: "",
       time: this._config.default_time || "06:00",
       days: [],                   // [] = every day
@@ -108,6 +123,65 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
     };
     this._lastError = null;
     this._lastSuccess = null;
+  }
+
+  // v4.0-rc-3 (F-J) — read existing schedules from the integration's
+  // global Schedules sensor. Returns an array of schedule dicts as
+  // stored by zone_store, or [] if the sensor isn't loaded yet.
+  _existingSchedules() {
+    if (!this._hass || !this._hass.states) return [];
+    const s = this._hass.states["sensor.z2m_irrigation_schedules"];
+    if (!s || !s.attributes) return [];
+    return s.attributes.schedules || [];
+  }
+
+  // v4.0-rc-3 (F-J) — pull a stored schedule into the form for editing.
+  _loadScheduleForEdit(schedule_id) {
+    const sched = this._existingSchedules().find(s => s.id === schedule_id);
+    if (!sched) {
+      this._lastError = `Schedule ${schedule_id} not found in the sensor cache.`;
+      this._render();
+      return;
+    }
+    this._form = {
+      editing_id: sched.id,
+      name: sched.name || "",
+      time: sched.time || "06:00",
+      days: Array.isArray(sched.days) ? sched.days.slice() : [],
+      mode: sched.mode || "smart",
+      zones: Array.isArray(sched.zones) ? sched.zones.slice() : [],
+      fixed_liters_per_zone:
+        sched.fixed_liters_per_zone != null
+          ? String(sched.fixed_liters_per_zone)
+          : "",
+      enabled: sched.enabled !== false,
+    };
+    this._lastError = null;
+    this._lastSuccess = null;
+    this._render();
+  }
+
+  async _deleteSchedule(schedule_id, name) {
+    if (!this._hass) return;
+    const ok = window.confirm(
+      `Delete schedule "${name || schedule_id}"?\n\nThis cannot be undone.`,
+    );
+    if (!ok) return;
+    try {
+      await this._hass.callService(
+        "z2m_irrigation", "delete_schedule",
+        { schedule_id },
+      );
+      this._lastSuccess = `Deleted "${name || schedule_id}".`;
+      // If we were editing the deleted schedule, reset to create mode.
+      if (this._form && this._form.editing_id === schedule_id) {
+        this._resetForm();
+      }
+      this._render();
+    } catch (e) {
+      this._lastError = (e && e.message) ? e.message : String(e);
+      this._render();
+    }
   }
 
   _discoverZones() {
@@ -123,9 +197,20 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
       if (eid === "switch.z2m_irrigation_master_enable") continue;
       const base = eid.replace("switch.", "");
       if (this._hass.states[`sensor.${base}_zone_factor`]) {
+        // CRITICAL: the zone identifier sent to create_schedule MUST
+        // be the valve's friendly_name (e.g. "Front Garden"), NOT the
+        // slugified entity_id (e.g. "front_garden"). The integration
+        // keys ZoneStore and the running engine's resolver by valve
+        // friendly_name (which is z2m's MQTT friendly_name and the
+        // integration's valve.topic). An earlier rc-2 build of this
+        // card stored the slug, which produced schedules that resolved
+        // to zero zones at fire time and got stamped with outcome
+        // `skipped_no_zones`. friendly_name is always present on
+        // discovered z2m_irrigation switches.
+        const friendlyName = (st.attributes && st.attributes.friendly_name) || base;
         out.push({
-          id: base,
-          name: (st.attributes && st.attributes.friendly_name) || base,
+          id: friendlyName,
+          name: friendlyName,
         });
       }
     }
@@ -313,6 +398,85 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
       }
 
       .field.hidden { display: none; }
+
+      /* v4.0-rc-3 (F-J) — existing schedule list */
+      .title.small { font-size: 16px; margin-bottom: 12px; }
+      .divider {
+        border: none;
+        border-top: 1px solid rgba(127,127,127,0.18);
+        margin: 22px 0 18px 0;
+      }
+      .sched-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 6px;
+      }
+      .sched-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 14px;
+        background: rgba(127,127,127,0.06);
+        border: 1px solid rgba(127,127,127,0.12);
+        border-radius: 12px;
+        transition: all 200ms ease;
+      }
+      .sched-row:hover {
+        background: rgba(127,127,127,0.10);
+      }
+      .sched-row.editing {
+        background: rgba(13,115,119,0.08);
+        border-color: rgba(13,115,119,0.40);
+      }
+      .sched-info { flex: 1; min-width: 0; }
+      .sched-name {
+        font-size: 14px;
+        font-weight: 600;
+        margin-bottom: 3px;
+      }
+      .sched-meta {
+        font-size: 11px;
+        opacity: 0.65;
+        line-height: 1.4;
+      }
+      .sched-actions {
+        display: flex;
+        gap: 6px;
+        flex-shrink: 0;
+      }
+      .btn-mini {
+        font: inherit;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 6px 12px;
+        border-radius: 8px;
+        border: 1px solid rgba(127,127,127,0.20);
+        background: var(--ha-card-background, #fff);
+        color: inherit;
+        cursor: pointer;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        transition: all 150ms ease;
+      }
+      .btn-mini:hover { background: rgba(127,127,127,0.10); }
+      .btn-mini.btn-edit:hover { background: rgba(13,115,119,0.12); border-color: #0d7377; }
+      .btn-mini.btn-delete:hover { background: rgba(192,57,43,0.12); border-color: #c0392b; color: #c0392b; }
+
+      .badge {
+        display: inline-block;
+        font-size: 9px;
+        font-weight: 700;
+        padding: 2px 7px;
+        border-radius: 10px;
+        margin-left: 6px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        vertical-align: middle;
+      }
+      .badge-on  { background: rgba(13,115,119,0.15); color: #0d7377; }
+      .badge-off { background: rgba(127,127,127,0.18); color: rgba(127,127,127,0.85); }
     `;
     return style;
   }
@@ -320,6 +484,42 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
   _buildBody() {
     const f = this._form;
     const zones = this._zonesCache || [];
+    const isEdit = !!f.editing_id;
+
+    // v4.0-rc-3 (F-J) — existing schedule list at the top with
+    // Edit and Delete buttons per row.
+    const existing = this._existingSchedules();
+    const existingList = existing.length === 0
+      ? `<div class="hint">No schedules yet. Use the form below to create your first one.</div>`
+      : existing.map(s => {
+          const days = (s.days && s.days.length) ? s.days.join(",") : "every day";
+          const zoneCount = (s.zones || []).length;
+          const enabledBadge = s.enabled === false
+            ? '<span class="badge badge-off">disabled</span>'
+            : '<span class="badge badge-on">enabled</span>';
+          const isThisOne = isEdit && f.editing_id === s.id;
+          return `
+            <div class="sched-row${isThisOne ? ' editing' : ''}">
+              <div class="sched-info">
+                <div class="sched-name">${this._escape(s.name || s.id)} ${enabledBadge}</div>
+                <div class="sched-meta">
+                  ${this._escape(s.time || '?')} ·
+                  ${this._escape(days)} ·
+                  ${this._escape(s.mode || 'smart')} ·
+                  ${zoneCount} zone${zoneCount === 1 ? '' : 's'}
+                  ${s.last_run_outcome ? ' · last: ' + this._escape(s.last_run_outcome) : ''}
+                </div>
+              </div>
+              <div class="sched-actions">
+                <button type="button" class="btn-mini btn-edit"
+                        data-edit-id="${this._escape(s.id)}">edit</button>
+                <button type="button" class="btn-mini btn-delete"
+                        data-delete-id="${this._escape(s.id)}"
+                        data-delete-name="${this._escape(s.name || s.id)}">delete</button>
+              </div>
+            </div>
+          `;
+        }).join("");
 
     const dayChips = DAYS.map(d => `
       <span class="chip" data-day="${d}" data-on="${f.days.includes(d) ? 1 : 0}">
@@ -338,8 +538,15 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
     const fixedHidden = f.mode === "smart" ? " hidden" : "";
 
     return `
-      <div class="accent">create schedule</div>
-      <div class="title">New irrigation schedule</div>
+      <div class="accent">existing schedules</div>
+      <div class="title small">${existing.length} schedule${existing.length === 1 ? '' : 's'}</div>
+      <div class="sched-list">${existingList}</div>
+      <hr class="divider">
+
+      <div class="accent">${isEdit ? 'edit schedule' : 'create schedule'}</div>
+      <div class="title">
+        ${isEdit ? 'Editing: ' + this._escape(f.name || f.editing_id) : 'New irrigation schedule'}
+      </div>
 
       <div class="field">
         <label>Name</label>
@@ -388,10 +595,14 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
       </div>
 
       <div class="actions">
-        <button type="button" class="btn" id="f-reset">Reset</button>
+        <button type="button" class="btn" id="f-reset">
+          ${isEdit ? 'Cancel edit' : 'Reset form'}
+        </button>
         <button type="button" class="btn btn-primary" id="f-submit"
                 ${this._submitting ? "disabled" : ""}>
-          ${this._submitting ? "Creating…" : "Create schedule"}
+          ${this._submitting
+              ? (isEdit ? 'Saving…' : 'Creating…')
+              : (isEdit ? 'Save changes' : 'Create schedule')}
         </button>
       </div>
 
@@ -446,7 +657,7 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
       });
     });
 
-    // Reset button
+    // Reset / cancel-edit button
     const $reset = root.querySelector("#f-reset");
     if ($reset) $reset.addEventListener("click", () => {
       this._resetForm();
@@ -456,6 +667,21 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
     // Submit button
     const $submit = root.querySelector("#f-submit");
     if ($submit) $submit.addEventListener("click", () => this._submit());
+
+    // v4.0-rc-3 (F-J) — existing schedule list edit + delete buttons
+    root.querySelectorAll(".btn-edit").forEach(el => {
+      el.addEventListener("click", () => {
+        const id = el.dataset.editId;
+        if (id) this._loadScheduleForEdit(id);
+      });
+    });
+    root.querySelectorAll(".btn-delete").forEach(el => {
+      el.addEventListener("click", () => {
+        const id = el.dataset.deleteId;
+        const name = el.dataset.deleteName;
+        if (id) this._deleteSchedule(id, name);
+      });
+    });
   }
 
   // ───────────────────────────────────────────────────────────────────
@@ -497,6 +723,7 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
       }
     }
 
+    const isEdit = !!f.editing_id;
     const data = {
       name: f.name.trim(),
       time: f.time,
@@ -507,6 +734,10 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
     };
     if (f.mode === "fixed") {
       data.fixed_liters_per_zone = parseFloat(f.fixed_liters_per_zone);
+    } else {
+      // v4.0-rc-3 (F-J): explicit null when switching back to smart
+      // mode during an edit, so we clear any leftover fixed value.
+      data.fixed_liters_per_zone = null;
     }
 
     this._submitting = true;
@@ -515,8 +746,20 @@ class Z2MIrrigationScheduleEditorCard extends HTMLElement {
     this._render();
 
     try {
-      await this._hass.callService("z2m_irrigation", "create_schedule", data);
-      this._lastSuccess = `Created "${data.name}". The Schedule list refreshes within a few seconds.`;
+      if (isEdit) {
+        // EDIT mode — call update_schedule with the existing id.
+        await this._hass.callService(
+          "z2m_irrigation", "update_schedule",
+          { schedule_id: f.editing_id, ...data },
+        );
+        this._lastSuccess = `Saved changes to "${data.name}".`;
+      } else {
+        // CREATE mode — call create_schedule.
+        await this._hass.callService(
+          "z2m_irrigation", "create_schedule", data,
+        );
+        this._lastSuccess = `Created "${data.name}". The Schedule list refreshes within a few seconds.`;
+      }
       this._resetFormPreservingSuccess();
     } catch (e) {
       this._lastError = (e && e.message) ? e.message : String(e);

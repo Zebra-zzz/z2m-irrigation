@@ -2,6 +2,129 @@
 
 All notable changes to the Z2M Irrigation integration will be documented in this file.
 
+## [4.0.0rc3] - 2026-04-09
+
+### 🐛 v4.0 release candidate 3 — UX gaps from the live soak
+
+Three real issues found during the rc-2 soak and fixed in rc-3:
+
+#### B5 — `last_session_liters` not persisted across HA restart
+
+`Valve.last_session_liters` is set in `_end_and_sync` after a session
+ends, but it was **never loaded from the SQLite database on startup**.
+After every HA restart, the field stayed `None` until the next session
+ended, so the per-zone tile metric showed `— L` for hours/days even
+though the session history had the data.
+
+**Fix in `database.py`**: new `IrrigationDatabase.get_last_session(valve_topic)`
+method that returns the most recent completed session row for one valve
+(volume_liters, duration_minutes, started_at, ended_at, trigger_type,
+target_liters, target_minutes).
+
+**Fix in `manager.py`**: `_ensure_valve._sub()` now calls
+`db.get_last_session()` alongside the existing 24h/7d aggregate loads
+and populates `valve.last_session_liters` from the result. Logged at
+INFO level: `B5: hydrated last_session_liters for <zone> = X.XX L`.
+
+After deploying rc-3 + restarting HA once, every zone tile should
+show its real last-run liters immediately on cold start.
+
+#### F-I — Session Log tab
+
+User asked for a Log tab showing all runs in a table with start/stop
+times, trigger type, starting parameters, and final delivered values.
+All this data already lives in the SQLite `sessions` table — just
+needed to be exposed as an HA entity and rendered.
+
+**New backend method** in `database.py`:
+`get_recent_sessions(limit=200, valve_topic=None)` — returns the most
+recent N completed sessions newest-first, optionally filtered to one
+valve. Each row carries: session_id, valve, name, started_at, ended_at,
+duration_minutes, volume_liters, avg_flow_lpm, trigger_type,
+target_liters, target_minutes, completed_successfully.
+
+**New global sensor** `sensor.z2m_irrigation_session_log`:
+* State = total session count in the buffer (≤ 200)
+* Attributes: `sessions[]` array of dicts (most-recent first), `limit`
+* Refreshed on `async_added_to_hass` and every 5 minutes via
+  `async_track_time_interval`. The 5-min cadence is faster than the
+  manager's 15-min metric loop because session-end timing is when the
+  user is most likely to be looking at the Log tab.
+
+**New "Log" tab** in the dashboard (5th view): markdown card with
+Jinja that renders the most recent 50 sessions as a table with columns
+**When · Zone · Trigger · Target · Delivered · Duration · Avg flow · OK**.
+Trailing rows beyond 50 stay in the buffer attribute but are not
+rendered (HA markdown card has implicit size limits). Buffer cap is
+200 entries total.
+
+#### F-J — Schedule editor card edit/delete
+
+The user reported they could create schedules from the dashboard but
+had no way to edit or delete them — they had to call
+`z2m_irrigation.update_schedule` / `delete_schedule` from Developer
+Tools with the schedule_id.
+
+**Editor card upgrade** (`z2m-irrigation-schedule-editor-card.js`,
+version bumped to `4.0.0rc3`):
+
+* New "existing schedules" list at the top of the card, populated
+  from `sensor.z2m_irrigation_schedules.attributes.schedules`. One row
+  per schedule with the name + enabled/disabled badge, time, days,
+  mode, zone count, and last run outcome.
+* Per-row **Edit** button: pre-fills the form with the schedule's
+  current values and switches the form into edit mode (form title
+  changes to `Editing: <name>`, submit button label changes from
+  `Create schedule` to `Save changes`).
+* Per-row **Delete** button: shows a `window.confirm` dialog and
+  calls `z2m_irrigation.delete_schedule` with the schedule_id.
+* New `_form.editing_id` field — null in CREATE mode, set to the
+  schedule_id when editing. The submit handler routes to either
+  `update_schedule` or `create_schedule` based on this flag.
+* `_loadScheduleForEdit(schedule_id)` reads the schedule from the
+  sensor cache and pre-fills every field including the chip
+  selectors for days and zones.
+* `_deleteSchedule(schedule_id, name)` shows the confirm dialog and
+  calls the delete service.
+* The reset button label changes from "Reset form" to "Cancel edit"
+  in edit mode and restores create mode on click.
+* New CSS for the schedule list (`.sched-row`, `.sched-info`,
+  `.sched-actions`, `.btn-mini.btn-edit`, `.btn-mini.btn-delete`,
+  `.badge`, `.divider`).
+* `set hass(hass)` now also re-renders when the schedules sensor's
+  attributes change (after a CREATE / UPDATE / DELETE service call
+  lands), not just on zones change.
+
+#### Backward compatibility
+
+- v3.2.1 through v4.0-rc-2 behaviour is preserved end-to-end. All
+  rc-3 changes are additive.
+- The new `database.get_last_session` and `get_recent_sessions`
+  methods don't modify the SQLite schema or any existing data —
+  they're pure reads using the existing `idx_sessions_ended` index.
+- The new `SessionLogSensor` is opt-in via the dashboard. If you
+  don't import the new dashboard YAML, the sensor still loads but
+  nothing renders it.
+- The schedule editor card edit/delete features are additive — the
+  existing CREATE flow continues to work unchanged. Edit mode is
+  only entered when the user explicitly clicks an Edit button on
+  an existing schedule row.
+
+#### What's still pending in v4.0
+
+- **F-B** — sun-relative schedule times (sunrise-45m etc) — v4.1
+- **F-G** — VPD time-of-day sampling bias (24h average) — v4.1
+- **F-H** — backend rename `l_per_mm` → `area_m2`, `base_mm` →
+  `water_per_day_mm` (rc-4 candidate, schema migration v1 → v2)
+- **B3** — reconcile `unique_id` ↔ `friendly_name` mismatch on global
+  sensors (causes the entity_id slugs to drop the `_summary` suffix
+  the unique_id implies). Cosmetic, deferred.
+- **B4** — delete stale `.storage/z2m_irrigation.<old_entry_id>` file
+  from a previous config-entry. Cleanup, deferred.
+- **F-A polish** — auto-add a 5th valve to the dashboard without
+  needing YAML edits. Requires a custom JS card for per-zone tiles
+  that doesn't depend on auto-entities. v4.1 candidate.
+
 ## [4.0.0rc2] - 2026-04-09
 
 ### 🐛 v4.0 release candidate 2 — unit-aware weather conversion

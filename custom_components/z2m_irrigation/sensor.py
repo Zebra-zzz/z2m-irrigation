@@ -70,6 +70,10 @@ async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
         ScheduleHistorySensor(mgr),
         # v4.0-alpha-4 — global daily delivery totals
         DailyTotalsSensor(mgr),
+        # v4.0-rc-3 — session log (F-I) — recent completed sessions
+        # exposed as a sensor attribute so the dashboard Log tab can
+        # render them as a table without needing recorder access.
+        SessionLogSensor(mgr),
     ], True)
 
 class BaseValveSensor(SensorEntity):
@@ -957,4 +961,89 @@ class DailyTotalsSensor(BaseGlobalSensor):
                 }
                 for z in summary.zones
             ],
+        }
+
+
+class SessionLogSensor(BaseGlobalSensor):
+    """v4.0-rc-3 (F-I) — `sensor.z2m_irrigation_session_log`.
+
+    Exposes the most recent completed irrigation sessions as a sensor
+    attribute so the dashboard's Log tab can render them as a table.
+    All data is read from the existing SQLite session history — no
+    recorder access required.
+
+    State = total session count in the buffer.
+    Attributes:
+      `sessions`: list of session dicts (most recent first), each with
+        `started_at`, `ended_at`, `name`, `valve`, `trigger_type`,
+        `target_liters`, `target_minutes`, `volume_liters`,
+        `duration_minutes`, `avg_flow_lpm`, `completed_successfully`.
+
+    Refreshed by:
+      * `_periodic_refresh` (every 15 min via `_async_track_time_interval`)
+      * Hydrated on startup from the manager's existing
+        `_periodic_refresh_time_metrics` cycle (which now also calls
+        the session log refresh — see manager.py rc-3 patch)
+      * On-demand via the `recalculate_now` service path (alpha-1)
+
+    The buffer is capped at 200 entries by the underlying database
+    method to keep the attribute size sane.
+    """
+
+    _attr_icon = "mdi:format-list-bulleted"
+    _LIMIT = 200
+
+    def __init__(self, mgr: ValveManager):
+        super().__init__(
+            mgr, "Z2M Irrigation Session Log",
+            "z2m_irrigation_session_log",
+        )
+        self._sessions: list = []
+        self._unsub_periodic = None
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # Initial load + periodic refresh.
+        await self._refresh()
+
+        # Re-fetch every 5 min so newly-ended sessions appear without
+        # waiting for the manager's 15-min loop or a global signal.
+        from datetime import timedelta
+        from homeassistant.helpers.event import async_track_time_interval
+
+        async def _periodic(_now):
+            await self._refresh()
+
+        self._unsub_periodic = async_track_time_interval(
+            self.hass, _periodic, timedelta(minutes=5),
+        )
+
+    async def async_will_remove_from_hass(self) -> None:
+        await super().async_will_remove_from_hass()
+        if self._unsub_periodic:
+            self._unsub_periodic()
+            self._unsub_periodic = None
+
+    async def _refresh(self) -> None:
+        try:
+            self._sessions = await self.mgr.db.get_recent_sessions(
+                limit=self._LIMIT,
+            )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(
+                "SessionLogSensor refresh failed: %s", e,
+            )
+            self._sessions = []
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> int:
+        return len(self._sessions)
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        return {
+            "sessions": self._sessions,
+            "limit": self._LIMIT,
         }
