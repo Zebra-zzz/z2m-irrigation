@@ -15,6 +15,16 @@ SIG_NEW_VALVE = "z2m_irrigation_new_valve"
 def sig_update(topic: str) -> str:
     return f"z2m_irrigation_update::{topic}"
 
+# v4.0-alpha-1 — global dispatcher signal fired by the manager whenever
+# any system-wide state changes that the global sensors should react to
+# (today_calculation refreshed, master_enable toggled, zone config edited).
+# Per-valve updates continue to use sig_update(topic) — global sensors that
+# care about per-valve state subscribe to those individually via SIG_NEW_VALVE.
+SIG_GLOBAL_UPDATE = "z2m_irrigation_global_update"
+
+def sig_zone_config_changed(zone: str) -> str:
+    return f"z2m_irrigation_zone_config_changed::{zone}"
+
 PLATFORMS = [
     Platform.SENSOR,
     Platform.SWITCH,
@@ -189,3 +199,128 @@ EVENT_DEVICE_STATUS_CHANGED = "z2m_irrigation_device_status_changed"
 # ─────────────────────────────────────────────────────────────────────────────
 
 INITIAL_VALVE_AUTO_CLOSE_WHEN_WATER_SHORTAGE = "DISABLE"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v4.0-alpha-1 — JSON config store
+#
+# Per Stage 2 architecture: the integration owns two persistence stores.
+#   1. SQLite session-history database (`database.py`) — append-mostly
+#      time-series of valve sessions.
+#   2. JSON config store (`zone_store.py`) — small mutable config (zones,
+#      schedules, history events). Stored in HA's `.storage/` dir via the
+#      `homeassistant.helpers.storage.Store` helper.
+#
+# The store key is suffixed with the config_entry_id so two instances of
+# the integration would not collide.
+# ─────────────────────────────────────────────────────────────────────────────
+
+STORE_VERSION = 1
+STORE_KEY_PREFIX = "z2m_irrigation"
+
+# Per-zone defaults applied when a valve is first discovered. The user can
+# edit any of these per-zone via the Setup tab in v4.0 / via service calls.
+DEFAULT_ZONE_FACTOR = 1.0
+DEFAULT_ZONE_L_PER_MM = 12.0
+DEFAULT_ZONE_BASE_MM = 4.0
+DEFAULT_ZONE_IN_SMART_CYCLE = True
+
+# Persistence retention for the per-zone run history. Older entries are
+# pruned on each write to keep the JSON store small. Both a date cutoff
+# AND a hard count cap apply — whichever is more aggressive wins.
+HISTORY_RETENTION_DAYS = 90
+
+# Hard cap on history entries per scope (e.g. global schedule timeline,
+# per-zone session summaries). Prevents unbounded JSON growth even on
+# unusual usage patterns. ~500 entries × ~200 bytes ≈ 100 KB per scope.
+HISTORY_MAX_ENTRIES = 500
+
+# Lookback used by the rolling avg-flow per-zone sensor. Reads from the
+# existing SQLite session history via `db.get_recent_avg_flow`. Higher
+# values smooth out one-off anomalies; lower values react faster to
+# changing conditions (filter clog, valve degradation).
+AVG_FLOW_LOOKBACK_DAYS = 7
+AVG_FLOW_LOOKBACK_SESSIONS = 10
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v4.0-alpha-1 — config flow keys
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Step 2 — weather sources (all optional, calculator falls back gracefully)
+CONF_WEATHER_VPD_ENTITY = "weather_vpd_entity"
+CONF_WEATHER_RAIN_TODAY_ENTITY = "weather_rain_today_entity"
+CONF_WEATHER_RAIN_FORECAST_24H_ENTITY = "weather_rain_forecast_24h_entity"
+CONF_WEATHER_TEMP_ENTITY = "weather_temp_entity"
+
+# Step 3 — safety + global thresholds
+CONF_KILL_SWITCH_ENTITY = "kill_switch_entity"
+CONF_KILL_SWITCH_MODE = "kill_switch_mode"
+CONF_GLOBAL_SKIP_RAIN_MM = "global_skip_rain_threshold_mm"
+CONF_GLOBAL_SKIP_FORECAST_MM = "global_skip_forecast_threshold_mm"
+CONF_GLOBAL_MIN_RUN_LITERS = "global_min_run_liters"
+
+KILL_SWITCH_MODE_OFF_ONLY = "off_only"
+KILL_SWITCH_MODE_OFF_AND_NOTIFY = "off_and_notify"
+KILL_SWITCH_MODE_DISABLED = "disabled"
+KILL_SWITCH_MODES = [
+    KILL_SWITCH_MODE_OFF_ONLY,
+    KILL_SWITCH_MODE_OFF_AND_NOTIFY,
+    KILL_SWITCH_MODE_DISABLED,
+]
+DEFAULT_KILL_SWITCH_MODE = KILL_SWITCH_MODE_OFF_AND_NOTIFY
+
+DEFAULT_GLOBAL_SKIP_RAIN_MM = 5.0
+DEFAULT_GLOBAL_SKIP_FORECAST_MM = 8.0
+DEFAULT_GLOBAL_MIN_RUN_LITERS = 2.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v4.0-alpha-2 — Scheduler engine
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Stage 2 schedule modes:
+#   smart — calculator chooses per-zone liters from current weather + zone cfg
+#   fixed — every zone in the schedule gets the same fixed_liters_per_zone
+SCHEDULE_MODE_SMART = "smart"
+SCHEDULE_MODE_FIXED = "fixed"
+SCHEDULE_MODES = [SCHEDULE_MODE_SMART, SCHEDULE_MODE_FIXED]
+
+# Weekday tokens — match Stage 2 spec. Index = Python weekday (Mon=0..Sun=6).
+DAYS_OF_WEEK = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+# Catch-up window: if HA starts up and missed a schedule's fire time by no
+# more than this many minutes, run it now. Beyond this, the missed run is
+# logged as `skipped_catchup_window` and the user can manually re-trigger.
+SCHEDULE_CATCHUP_WINDOW_MINUTES = 30
+
+# Time the engine waits between sequential zones in a multi-zone schedule.
+# Gives the device a moment to fully close before the next opens.
+SCHEDULE_INTER_ZONE_GAP_SECONDS = 5
+
+# Maximum time the engine waits for a published volume run to actually
+# transition the valve to session_active. If the device doesn't acknowledge
+# within this window the engine logs a warning and advances to the next
+# queue entry rather than getting wedged.
+SCHEDULE_RUN_START_TIMEOUT_SECONDS = 60
+
+# Polling cadence for the queue runner's "is the active valve still
+# running?" check. Cheap — just an in-memory bool read.
+SCHEDULE_QUEUE_POLL_SECONDS = 2
+
+# Schedule outcome labels written to the schedule's `last_run_outcome`
+# field after each fire attempt. Surfaced on the dashboard schedule list.
+OUTCOME_RAN = "ran"
+OUTCOME_RAN_PARTIAL = "ran_partial"
+OUTCOME_SKIPPED_RAIN = "skipped_rain"
+OUTCOME_SKIPPED_FORECAST = "skipped_forecast"
+OUTCOME_SKIPPED_DISABLED = "skipped_disabled"
+OUTCOME_SKIPPED_PAUSED = "skipped_master_paused"
+OUTCOME_SKIPPED_PANIC = "skipped_panic"
+OUTCOME_SKIPPED_TODAY = "skipped_today"
+OUTCOME_SKIPPED_NO_ZONES = "skipped_no_zones"
+OUTCOME_SKIPPED_CATCHUP_WINDOW = "skipped_catchup_window"
+OUTCOME_ERROR = "error"
+
+# Bus event names emitted by the engine for automation hooks.
+EVENT_SCHEDULE_FIRED = "z2m_irrigation_schedule_fired"
+EVENT_SCHEDULE_SKIPPED = "z2m_irrigation_schedule_skipped"
+EVENT_SMART_RUN_STARTED = "z2m_irrigation_smart_run_started"
+

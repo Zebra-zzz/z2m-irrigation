@@ -4,8 +4,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.restore_state import RestoreEntity
 from .manager import ValveManager, Valve
-from .const import DOMAIN, MANUFACTURER, MODEL, SIG_NEW_VALVE, sig_update
+from .const import DOMAIN, MANUFACTURER, MODEL, SIG_NEW_VALVE, sig_update, SIG_GLOBAL_UPDATE
 
 async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
     mgr: ValveManager = hass.data[DOMAIN][entry.entry_id]["manager"]
@@ -15,6 +16,9 @@ async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
     for v in list(mgr.valves.values()):
         _add(v)
     entry.async_on_unload(async_dispatcher_connect(hass, SIG_NEW_VALVE, _add))
+
+    # v4.0-alpha-1 — global master-enable switch (singleton).
+    async_add_entities([MasterEnableSwitch(mgr)], True)
 
 class ValveSwitch(SwitchEntity):
     _attr_has_entity_name = True; _attr_name = "Valve"
@@ -36,3 +40,55 @@ class ValveSwitch(SwitchEntity):
         if self._unsub: self._unsub(); self._unsub=None
     async def async_turn_on(self, **kwargs) -> None: await self.mgr.async_turn_on(self.valve.topic)
     async def async_turn_off(self, **kwargs) -> None: await self.mgr.async_turn_off(self.valve.topic)
+
+
+class MasterEnableSwitch(SwitchEntity, RestoreEntity):
+    """Global pause switch for the integration's scheduler.
+
+    v4.0-alpha-1 — backed by `ValveManager.master_enable`. When OFF, the
+    alpha-2 scheduler will skip new schedule runs (running sessions are
+    NOT cancelled, and manual `start_liters` / `start_timed` calls are
+    NOT blocked — pause only affects scheduled runs).
+
+    State persists across HA restart via RestoreEntity, so a paused
+    integration stays paused after a reboot.
+    """
+
+    _attr_has_entity_name = False
+    _attr_name = "Z2M Irrigation Master Enable"
+    _attr_unique_id = "z2m_irrigation_master_enable"
+    _attr_icon = "mdi:pause-octagon"
+
+    def __init__(self, mgr: ValveManager) -> None:
+        self.mgr = mgr
+        self._unsub = None
+
+    @property
+    def is_on(self) -> bool:
+        return self.mgr.master_enable
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is not None and last.state in ("on", "off"):
+            self.mgr.master_enable = (last.state == "on")
+
+        @callback
+        def _on_global():
+            self.async_write_ha_state()
+
+        self._unsub = async_dispatcher_connect(
+            self.hass, SIG_GLOBAL_UPDATE, _on_global,
+        )
+        self.async_write_ha_state()
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._unsub:
+            self._unsub()
+            self._unsub = None
+
+    async def async_turn_on(self, **kwargs) -> None:
+        self.mgr.set_master_enable(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        self.mgr.set_master_enable(False)

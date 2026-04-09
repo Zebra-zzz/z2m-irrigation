@@ -3,12 +3,52 @@ import logging
 import sqlite3
 import asyncio
 import threading
-from datetime import datetime, timedelta
-from typing import Optional, Dict, List, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional, Dict, List, Tuple
 from pathlib import Path
 from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# v4.0-rc-3 hotfix — timezone-correct ISO timestamp helpers
+#
+# History: pre-rc-3 the integration stored session timestamps as
+# `datetime.utcnow().isoformat()` which produces a NAIVE UTC string
+# (no `+00:00` suffix). When the dashboard parsed those strings via
+# Jinja `as_datetime`, HA's helper treats unmarked strings as LOCAL
+# time, so a session that ended at "2026-04-09T01:50:44" UTC was
+# rendered as if it had ended at 01:50 Melbourne — i.e. ~10 hours
+# off, in the future of the actual time.
+#
+# Going forward, all NEW session rows are written with `_iso_utc()`
+# which produces `"…+00:00"`. Old NAIVE rows are repaired at read
+# time by `_ensure_tz(s)` which adds the UTC marker if missing.
+
+def _iso_utc() -> str:
+    """Tagged-UTC ISO string for new session rows."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _ensure_tz(s: Optional[str]) -> Optional[str]:
+    """Add a `+00:00` UTC marker to a NAIVE ISO timestamp string.
+
+    Pre-rc-3 sessions were stored without a timezone marker. This
+    helper detects naive strings and tags them as UTC so downstream
+    consumers (Jinja `as_datetime`, JS `new Date()`) parse them
+    correctly. Already-tagged strings (with `+`, `-` after the time
+    portion, or trailing `Z`) are returned unchanged.
+    """
+    if not s:
+        return s
+    # Find the time portion — anything after the 'T'.
+    if "T" not in s:
+        return s
+    # Check the substring after the date portion for an existing marker.
+    after_t = s.split("T", 1)[1]
+    if "+" in after_t or after_t.endswith("Z") or "-" in after_t:
+        return s  # already tagged
+    return s + "+00:00"
 
 class IrrigationDatabase:
     """Local SQLite database for irrigation persistence"""
@@ -324,7 +364,10 @@ class IrrigationDatabase:
 
         with self._lock:
             try:
-                started_at = datetime.utcnow().isoformat()
+                # v4.0-rc-3 hotfix: tagged-UTC ISO so downstream parsers
+                # know the timezone. Pre-rc-3 used `datetime.utcnow()` which
+                # produces a NAIVE string and was misread as local time.
+                started_at = _iso_utc()
 
                 # Use connection.execute for better thread safety
                 self._conn.execute("""
@@ -361,7 +404,8 @@ class IrrigationDatabase:
 
         with self._lock:
             try:
-                ended_at = datetime.utcnow().isoformat()
+                # v4.0-rc-3 hotfix: tagged-UTC ISO (see _iso_utc above).
+                ended_at = _iso_utc()
 
                 # Use connection.execute for better thread safety
                 self._conn.execute("""
@@ -567,6 +611,181 @@ class IrrigationDatabase:
                 return None
 
     # ─────────────────────────────────────────────────────────────────────
+    # v4.0-rc-3 — last completed session lookup for cold-start hydration
+    #
+    # Without this, `Valve.last_session_liters` is None until the first
+    # session ends after an HA restart. The dashboard's per-zone tile
+    # metric reads `— L` for hours/days even though the SQLite session
+    # history has the data. B5 fix: load it on startup.
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def get_last_session(self, valve_topic: str) -> Optional[Dict[str, Any]]:
+        """Return the most recent COMPLETED session for one valve.
+
+        Returns a dict with `volume_liters`, `duration_minutes`,
+        `started_at`, `ended_at`, `trigger_type`, `target_liters`,
+        `target_minutes` — i.e. everything the dashboard might need to
+        render the last-run metric and the session log table.
+
+        Returns None if there's no completed session for this valve.
+        """
+        return await self.hass.async_add_executor_job(
+            self._get_last_session_sync, valve_topic,
+        )
+
+    def _get_last_session_sync(self, valve_topic: str) -> Optional[Dict[str, Any]]:
+        if not self._conn or not valve_topic:
+            return None
+        with self._lock:
+            try:
+                cursor = self._conn.execute(
+                    """
+                    SELECT volume_liters, duration_minutes, started_at,
+                           ended_at, trigger_type, target_liters, target_minutes
+                    FROM sessions
+                    WHERE valve_topic = ?
+                      AND ended_at IS NOT NULL
+                    ORDER BY ended_at DESC
+                    LIMIT 1
+                    """,
+                    (str(valve_topic),),
+                )
+                try:
+                    row = cursor.fetchone()
+                    if not row:
+                        return None
+                    return {
+                        "volume_liters": float(row["volume_liters"] or 0),
+                        "duration_minutes": float(row["duration_minutes"] or 0),
+                        # rc-3 hotfix: tag legacy NAIVE timestamps as UTC
+                        # so the dashboard's `as_datetime | as_local`
+                        # path produces correct local time.
+                        "started_at": _ensure_tz(row["started_at"]),
+                        "ended_at": _ensure_tz(row["ended_at"]),
+                        "trigger_type": row["trigger_type"],
+                        "target_liters": (
+                            float(row["target_liters"])
+                            if row["target_liters"] is not None else None
+                        ),
+                        "target_minutes": (
+                            float(row["target_minutes"])
+                            if row["target_minutes"] is not None else None
+                        ),
+                    }
+                finally:
+                    cursor.close()
+            except Exception as e:
+                _LOGGER.error(
+                    "❌ Error getting last session for %s: %s",
+                    valve_topic, e, exc_info=True,
+                )
+                return None
+
+    # ─────────────────────────────────────────────────────────────────────
+    # v4.0-rc-3 — recent sessions list for the Session Log tab (F-I)
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def get_recent_sessions(
+        self, limit: int = 200, valve_topic: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return the most recent N completed sessions, newest first.
+
+        Powers the Session Log tab. Each row carries everything the user
+        might want to see: timestamps, trigger type (`manual` /
+        `volume` / `timed` / `schedule_smart:<id>` / `schedule_fixed:<id>`),
+        target parameters, and final delivered values.
+
+        Optional `valve_topic` filter for per-zone log views (not used
+        by the global Log tab but available for future per-zone drill-down).
+        """
+        return await self.hass.async_add_executor_job(
+            self._get_recent_sessions_sync, limit, valve_topic,
+        )
+
+    def _get_recent_sessions_sync(
+        self, limit: int, valve_topic: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        if not self._conn:
+            return []
+        with self._lock:
+            try:
+                if valve_topic:
+                    cursor = self._conn.execute(
+                        """
+                        SELECT session_id, valve_topic, valve_name,
+                               started_at, ended_at, duration_minutes,
+                               volume_liters, avg_flow_rate, trigger_type,
+                               target_liters, target_minutes,
+                               completed_successfully
+                        FROM sessions
+                        WHERE valve_topic = ?
+                          AND ended_at IS NOT NULL
+                        ORDER BY ended_at DESC
+                        LIMIT ?
+                        """,
+                        (str(valve_topic), int(limit)),
+                    )
+                else:
+                    cursor = self._conn.execute(
+                        """
+                        SELECT session_id, valve_topic, valve_name,
+                               started_at, ended_at, duration_minutes,
+                               volume_liters, avg_flow_rate, trigger_type,
+                               target_liters, target_minutes,
+                               completed_successfully
+                        FROM sessions
+                        WHERE ended_at IS NOT NULL
+                        ORDER BY ended_at DESC
+                        LIMIT ?
+                        """,
+                        (int(limit),),
+                    )
+                try:
+                    rows = cursor.fetchall()
+                    return [
+                        {
+                            "session_id": r["session_id"],
+                            "valve": r["valve_topic"],
+                            "name": r["valve_name"],
+                            # rc-3 hotfix: tag legacy NAIVE timestamps as
+                            # UTC so the Log tab's Jinja can correctly
+                            # convert via `as_datetime | as_local`.
+                            "started_at": _ensure_tz(r["started_at"]),
+                            "ended_at": _ensure_tz(r["ended_at"]),
+                            "duration_minutes": (
+                                round(float(r["duration_minutes"]), 2)
+                                if r["duration_minutes"] is not None else None
+                            ),
+                            "volume_liters": (
+                                round(float(r["volume_liters"]), 2)
+                                if r["volume_liters"] is not None else None
+                            ),
+                            "avg_flow_lpm": (
+                                round(float(r["avg_flow_rate"]), 3)
+                                if r["avg_flow_rate"] is not None else None
+                            ),
+                            "trigger_type": r["trigger_type"],
+                            "target_liters": (
+                                float(r["target_liters"])
+                                if r["target_liters"] is not None else None
+                            ),
+                            "target_minutes": (
+                                float(r["target_minutes"])
+                                if r["target_minutes"] is not None else None
+                            ),
+                            "completed_successfully": bool(r["completed_successfully"]),
+                        }
+                        for r in rows
+                    ]
+                finally:
+                    cursor.close()
+            except Exception as e:
+                _LOGGER.error(
+                    "❌ Error getting recent sessions: %s", e, exc_info=True,
+                )
+                return []
+
+    # ─────────────────────────────────────────────────────────────────────
     # v3.1 — Safety: in-flight session recovery support
     # ─────────────────────────────────────────────────────────────────────
 
@@ -645,6 +864,117 @@ class IrrigationDatabase:
             except Exception as e:
                 _LOGGER.error(f"❌ Error querying recent avg flow: {e}", exc_info=True)
                 return None
+
+    # ─────────────────────────────────────────────────────────────────────
+    # v4.0-alpha-4 — daily aggregation for the dashboard charts
+    #
+    # The dashboard's Insight tab needs per-day per-zone delivery for the
+    # last ~30 days. This method does the grouping in SQL (cheap; SQLite
+    # has native DATE() and aggregate functions) so the manager can read
+    # it on a 15-min cadence without scanning every row in Python.
+    #
+    # We bucket on `ended_at` rather than `started_at` so a session that
+    # spans midnight is attributed to the day it finished — which matches
+    # how a user typically thinks about "what watered today".
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def get_daily_breakdown(
+        self,
+        valve_topic: str,
+        days: int = 30,
+        local_tz: Optional[Any] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return per-day delivery for one valve, most-recent first.
+
+        Each row: {date, liters, minutes, sessions}. Days with no
+        sessions are NOT in the result — the consumer is expected to
+        zero-fill any missing dates.
+
+        v4.0-rc-3 hotfix: bins by **local-time** date when `local_tz`
+        is provided. Pre-rc-3 used SQL `DATE(ended_at)` which bins by
+        UTC date — sessions that ran late evening Melbourne time
+        (= early morning UTC) were attributed to the wrong day on the
+        Insight tab chart. The local_tz binning fixes this for both
+        legacy NAIVE rows and new tagged rows.
+        """
+        return await self.hass.async_add_executor_job(
+            self._get_daily_breakdown_sync, valve_topic, days, local_tz,
+        )
+
+    def _get_daily_breakdown_sync(
+        self,
+        valve_topic: str,
+        days: int,
+        local_tz: Optional[Any] = None,
+    ) -> List[Dict[str, Any]]:
+        if not self._conn:
+            return []
+        if not valve_topic or not isinstance(valve_topic, str):
+            return []
+        with self._lock:
+            try:
+                cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+                cursor = self._conn.execute(
+                    """
+                    SELECT ended_at, volume_liters, duration_minutes
+                    FROM sessions
+                    WHERE valve_topic = ?
+                      AND ended_at IS NOT NULL
+                      AND ended_at >= ?
+                    ORDER BY ended_at DESC
+                    """,
+                    (str(valve_topic), str(cutoff)),
+                )
+                try:
+                    rows = cursor.fetchall()
+                except Exception:
+                    rows = []
+                finally:
+                    cursor.close()
+            except Exception as e:
+                _LOGGER.error(
+                    "❌ Error querying daily breakdown for %s: %s",
+                    valve_topic, e, exc_info=True,
+                )
+                return []
+
+        # Python-side bucketing by LOCAL-TIME date so the Insight tab
+        # chart shows sessions on the day the user perceives them, not
+        # the UTC day they happened to fall on.
+        from collections import defaultdict
+        buckets: Dict[str, Dict[str, float]] = defaultdict(
+            lambda: {"liters": 0.0, "minutes": 0.0, "sessions": 0}
+        )
+        for r in rows:
+            ended_at_str = _ensure_tz(r["ended_at"])
+            try:
+                ended_dt = datetime.fromisoformat(ended_at_str)
+            except Exception:
+                continue
+            if local_tz is not None:
+                try:
+                    ended_dt = ended_dt.astimezone(local_tz)
+                except Exception:
+                    pass  # fall back to whatever TZ ended_dt has
+            day_key = ended_dt.date().isoformat()
+            b = buckets[day_key]
+            b["liters"] += float(r["volume_liters"] or 0)
+            b["minutes"] += float(r["duration_minutes"] or 0)
+            b["sessions"] += 1
+
+        return sorted(
+            (
+                {
+                    "date": day,
+                    "liters": round(b["liters"], 2),
+                    "minutes": round(b["minutes"], 2),
+                    "sessions": int(b["sessions"]),
+                }
+                for day, b in buckets.items()
+            ),
+            key=lambda x: x["date"],
+            reverse=True,
+        )
 
     async def cleanup_old_sessions(self, days: int = 90):
         """Clean up sessions older than specified days"""

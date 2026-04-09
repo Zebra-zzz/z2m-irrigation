@@ -1,79 +1,52 @@
 start_timed:
   name: Start timed session
+  description: Start a valve for a fixed number of minutes (uses the device's native cyclic_timed_irrigation).
   fields:
-    valve: {name: Valve, selector: {text: {}}}
-    minutes: {name: Minutes, selector: {number: {min: 0, step: 1}}}
+    valve:
+      name: Valve
+      required: true
+      selector:
+        text: {}
+    minutes:
+      name: Minutes
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 1440
+          step: 1
 
 start_liters:
   name: Start liters session
+  description: Start a valve until a target volume has been delivered (uses the device's native cyclic_quantitative_irrigation).
   fields:
-    valve: {name: Valve, selector: {text: {}}}
-    liters: {name: Liters, selector: {number: {min: 0, step: 0.1}}}
+    valve:
+      name: Valve
+      required: true
+      selector:
+        text: {}
+    liters:
+      name: Liters
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 10000
+          step: 0.1
 
 reset_totals:
   name: Reset totals
+  description: Reset the resettable lifetime counters for one valve, or all valves if omitted. Lifetime totals are NEVER reset.
   fields:
-    valve: {name: Valve (optional), required: false, selector: {text: {}}}
+    valve:
+      name: Valve (optional)
+      required: false
+      selector:
+        text: {}
 
 rescan:
   name: Rescan Zigbee2MQTT devices
-  description: Re-requests the device list and re-subscribes without restarting.
-
-create_schedule:
-  name: Create irrigation schedule
-  description: Create a new time-based or interval-based irrigation schedule
-  fields:
-    name: {name: Schedule Name, required: true, selector: {text: {}}}
-    valve: {name: Valve Topic, required: true, selector: {text: {}}}
-    schedule_type: {name: Schedule Type, required: true, selector: {select: {options: [{label: "Time-based", value: "time_based"}, {label: "Interval", value: "interval"}]}}}
-    times: {name: Times (HH:MM), required: false, selector: {object: {}}}
-    days_of_week: {name: Days of Week (0-6), required: false, selector: {object: {}}}
-    interval_hours: {name: Interval Hours, required: false, selector: {number: {min: 1, max: 168}}}
-    run_type: {name: Run Type, required: true, selector: {select: {options: [{label: "Duration (minutes)", value: "duration"}, {label: "Volume (liters)", value: "volume"}]}}}
-    run_value: {name: Run Value, required: true, selector: {number: {min: 0.1, step: 0.1}}}
-    conditions: {name: Conditions (JSON), required: false, selector: {object: {}}}
-    enabled: {name: Enabled, required: false, default: true, selector: {boolean: {}}}
-
-update_schedule:
-  name: Update irrigation schedule
-  description: Update an existing irrigation schedule
-  fields:
-    schedule_id: {name: Schedule ID, required: true, selector: {text: {}}}
-    name: {name: Schedule Name, required: false, selector: {text: {}}}
-    valve: {name: Valve Topic, required: false, selector: {text: {}}}
-    schedule_type: {name: Schedule Type, required: false, selector: {select: {options: [{label: "Time-based", value: "time_based"}, {label: "Interval", value: "interval"}]}}}
-    times: {name: Times (HH:MM), required: false, selector: {object: {}}}
-    days_of_week: {name: Days of Week (0-6), required: false, selector: {object: {}}}
-    interval_hours: {name: Interval Hours, required: false, selector: {number: {min: 1, max: 168}}}
-    run_type: {name: Run Type, required: false, selector: {select: {options: [{label: "Duration (minutes)", value: "duration"}, {label: "Volume (liters)", value: "volume"}]}}}
-    run_value: {name: Run Value, required: false, selector: {number: {min: 0.1, step: 0.1}}}
-    conditions: {name: Conditions (JSON), required: false, selector: {object: {}}}
-    enabled: {name: Enabled, required: false, selector: {boolean: {}}}
-
-delete_schedule:
-  name: Delete irrigation schedule
-  fields:
-    schedule_id: {name: Schedule ID, required: true, selector: {text: {}}}
-
-enable_schedule:
-  name: Enable irrigation schedule
-  fields:
-    schedule_id: {name: Schedule ID, required: true, selector: {text: {}}}
-
-disable_schedule:
-  name: Disable irrigation schedule
-  fields:
-    schedule_id: {name: Schedule ID, required: true, selector: {text: {}}}
-
-run_schedule_now:
-  name: Run schedule immediately
-  description: Trigger a schedule to run now (ignores time settings)
-  fields:
-    schedule_id: {name: Schedule ID, required: true, selector: {text: {}}}
-
-reload_schedules:
-  name: Reload schedules
-  description: Reload all schedules from database
+  description: Re-requests the device list from Zigbee2MQTT and re-subscribes to all valve topics without restarting Home Assistant.
 
 clear_panic:
   name: Clear panic state
@@ -86,5 +59,339 @@ clear_panic:
       name: Cleared by
       description: Optional label for who/what cleared the panic (logged for audit).
       required: false
+      selector:
+        text: {}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v4.0-alpha-1 — Per-zone configuration services
+#
+# These mutate the JSON ZoneStore (`.storage/z2m_irrigation.<entry_id>`)
+# and dispatch a `zone_config_changed` signal so the per-zone sensors and
+# the today_calculation sensor refresh immediately.
+# ─────────────────────────────────────────────────────────────────────────────
+
+set_zone_factor:
+  name: Set zone factor
+  description: Per-zone calculator multiplier (default 1.0). Higher = more water for this zone.
+  fields:
+    zone:
+      name: Zone (valve friendly name)
+      required: true
+      selector:
+        text: {}
+    factor:
+      name: Factor
+      required: true
+      selector:
+        number:
+          min: 0.0
+          max: 10.0
+          step: 0.05
+
+set_zone_l_per_mm:
+  name: Set zone L/mm calibration
+  description: Liters of water delivered per 1 mm of irrigation depth for this zone.
+  fields:
+    zone:
+      name: Zone (valve friendly name)
+      required: true
+      selector:
+        text: {}
+    l_per_mm:
+      name: Liters per mm
+      required: true
+      selector:
+        number:
+          min: 0.0
+          max: 1000.0
+          step: 0.1
+
+set_zone_base_mm:
+  name: Set zone base mm
+  description: Per-zone baseline daily water depth (mm). Calculator input.
+  fields:
+    zone:
+      name: Zone (valve friendly name)
+      required: true
+      selector:
+        text: {}
+    base_mm:
+      name: Base mm/day
+      required: true
+      selector:
+        number:
+          min: 0.0
+          max: 50.0
+          step: 0.1
+
+set_zone_in_smart_cycle:
+  name: Include zone in smart cycle
+  description: Whether the calculator includes this zone in the smart-watering plan. When false, the zone still appears on the dashboard but is not auto-scheduled.
+  fields:
+    zone:
+      name: Zone (valve friendly name)
+      required: true
+      selector:
+        text: {}
+    enabled:
+      name: Enabled
+      required: true
+      selector:
+        boolean: {}
+
+set_zone_skip_thresholds:
+  name: Set zone skip thresholds
+  description: >
+    Override the global rain / forecast / min-run thresholds for one
+    zone. Pass null for any field to clear the override and inherit the
+    global value.
+  fields:
+    zone:
+      name: Zone (valve friendly name)
+      required: true
+      selector:
+        text: {}
+    rain_mm:
+      name: Skip if rain today exceeds (mm) — null = inherit global
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 0.5
+    forecast_mm:
+      name: Skip if rain forecast next 24h exceeds (mm) — null = inherit global
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 0.5
+    min_run_liters:
+      name: Skip if computed run is below (L) — null = inherit global
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 1000
+          step: 0.1
+
+recalculate_now:
+  name: Recalculate today
+  description: Force an immediate refresh of the today_calculation sensor (otherwise refreshed every 15 minutes).
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v4.0-alpha-2 — Schedule services
+# ─────────────────────────────────────────────────────────────────────────────
+
+create_schedule:
+  name: Create schedule
+  description: >
+    Create a new irrigation schedule. Smart mode lets the calculator
+    decide per-zone liters from current weather; fixed mode uses a
+    constant per-zone amount.
+  fields:
+    name:
+      name: Name
+      required: true
+      selector:
+        text: {}
+    time:
+      name: Time (HH:MM, local timezone)
+      required: true
+      selector:
+        text: {}
+    days:
+      name: Days of week (empty = every day)
+      required: false
+      selector:
+        select:
+          multiple: true
+          options:
+            - mon
+            - tue
+            - wed
+            - thu
+            - fri
+            - sat
+            - sun
+    mode:
+      name: Mode
+      required: false
+      default: smart
+      selector:
+        select:
+          options:
+            - smart
+            - fixed
+    zones:
+      name: Zones (valve friendly names; empty smart = all zones in smart cycle)
+      required: false
+      selector:
+        object: {}
+    fixed_liters_per_zone:
+      name: Fixed liters per zone (only for mode=fixed)
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 1000
+          step: 0.1
+    enabled:
+      name: Enabled
+      required: false
+      default: true
+      selector:
+        boolean: {}
+
+update_schedule:
+  name: Update schedule
+  description: Patch-update an existing schedule. Only the fields you pass are changed.
+  fields:
+    schedule_id:
+      name: Schedule ID
+      required: true
+      selector:
+        text: {}
+    name:
+      name: Name
+      required: false
+      selector:
+        text: {}
+    time:
+      name: Time (HH:MM)
+      required: false
+      selector:
+        text: {}
+    days:
+      name: Days of week
+      required: false
+      selector:
+        select:
+          multiple: true
+          options:
+            - mon
+            - tue
+            - wed
+            - thu
+            - fri
+            - sat
+            - sun
+    mode:
+      name: Mode
+      required: false
+      selector:
+        select:
+          options:
+            - smart
+            - fixed
+    zones:
+      name: Zones
+      required: false
+      selector:
+        object: {}
+    fixed_liters_per_zone:
+      name: Fixed liters per zone
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 1000
+          step: 0.1
+    enabled:
+      name: Enabled
+      required: false
+      selector:
+        boolean: {}
+
+delete_schedule:
+  name: Delete schedule
+  description: Permanently remove a schedule by id.
+  fields:
+    schedule_id:
+      name: Schedule ID
+      required: true
+      selector:
+        text: {}
+
+enable_schedule:
+  name: Enable schedule
+  fields:
+    schedule_id:
+      name: Schedule ID
+      required: true
+      selector:
+        text: {}
+
+disable_schedule:
+  name: Disable schedule
+  fields:
+    schedule_id:
+      name: Schedule ID
+      required: true
+      selector:
+        text: {}
+
+run_schedule_now:
+  name: Run schedule now
+  description: >
+    Force-fire a specific schedule immediately, ignoring its time/day
+    filter. Safety gates (master enable, panic, weather thresholds for
+    smart mode) still apply.
+  fields:
+    schedule_id:
+      name: Schedule ID
+      required: true
+      selector:
+        text: {}
+
+run_smart_now:
+  name: Run smart cycle now
+  description: >
+    Trigger an ad-hoc smart cycle. The calculator computes per-zone
+    liters from current weather and the queue runner fires them
+    sequentially. Pass an explicit zones list to limit which zones run,
+    or omit to use all zones flagged in_smart_cycle.
+  fields:
+    zones:
+      name: Zones (empty = all in_smart_cycle)
+      required: false
+      selector:
+        object: {}
+
+skip_today:
+  name: Skip irrigation today
+  description: >
+    Set a flag that causes all scheduled runs to skip until the next
+    local-time midnight. Manual `start_liters` / `start_timed` /
+    `run_smart_now` calls are NOT affected.
+
+clear_skip_today:
+  name: Clear skip-today flag
+  description: Clear the skip-today flag set by `skip_today`.
+
+cancel_queue:
+  name: Cancel queued runs
+  description: >
+    Empty the schedule engine's run queue. The currently in-flight valve
+    session is NOT cancelled — call `homeassistant.turn_off` on the
+    relevant valve switch separately if you also need to stop that.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v4.0-alpha-3 — Per-zone reset
+# ─────────────────────────────────────────────────────────────────────────────
+
+reset_zone_to_defaults:
+  name: Reset zone to defaults
+  description: >
+    Replace one zone's stored config (factor, l_per_mm, base_mm,
+    in_smart_cycle, skip threshold overrides, display fields) with the
+    integration defaults. Does NOT touch the zone's session-history rows
+    in the SQLite database — those are the long-term record and are
+    never wiped by a config edit.
+  fields:
+    zone:
+      name: Zone (valve friendly name)
+      required: true
       selector:
         text: {}
