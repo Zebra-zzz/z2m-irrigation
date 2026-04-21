@@ -788,7 +788,9 @@ views:
             content: |
               ## Next scheduled run
               {% set s = states('sensor.z2m_irrigation_next_run') %}
-              {% if s == 'no_schedule' %}
+              {% if s in ['unknown', 'unavailable', '', None] %}
+              _Loading…_
+              {% elif s == 'no_schedule' %}
               _No schedules yet. Use the **Create schedule** button below to add one._
               {% else %}
               {% set d = as_datetime(s) | as_local if s else None %}
@@ -1998,7 +2000,13 @@ views:
               directly from the integration's SQLite session history,
               capped at 200 entries. Each row shows when the session
               ran, what triggered it, the target parameter that was
-              set, and the final delivered values when the valve closed.
+              set, and the software-computed volume the integration
+              observed via MQTT flow publishes while the valve was
+              open. Note: the **device's own hardware quantitative
+              counter** is what actually closes the valve at target —
+              the software-computed figure is integration telemetry,
+              not the authoritative delivered volume, and can diverge
+              from the hardware figure if MQTT publishes are missed.
 
               {% set sessions = state_attr('sensor.z2m_irrigation_session_log', 'sessions') or [] %}
               {% if sessions | count == 0 %}
@@ -2006,7 +2014,7 @@ views:
               {% else %}
               **{{ sessions | count }}** sessions in the buffer.
 
-              | When | Zone | Trigger | Target | Delivered | Duration | Avg flow | OK |
+              | When | Zone | Trigger | Target | Software computed | Duration | Avg flow | OK |
               | --- | --- | --- | ---: | ---: | ---: | ---: | :---: |
               {% for s in sessions[:50] -%}
               {%- set ended = (as_datetime(s.ended_at) | as_local) if s.ended_at else None -%}

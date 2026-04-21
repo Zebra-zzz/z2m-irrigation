@@ -592,34 +592,41 @@ class ValveManager:
         from now. Entries older than 24h are pruned at load time.
         """
         if self.zone_store is None:
+            _LOGGER.info("📊 VPD hydrate: no zone_store, skipping")
             return
         raw = self.zone_store.get_vpd_buffer()
         if not raw:
+            _LOGGER.info("📊 VPD hydrate: no buffer in store (raw=%s)", type(raw))
             return
+        _LOGGER.info("📊 VPD hydrate: found %d entries in store, processing...", len(raw))
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
         now_wall = _dt.now(_tz.utc)
         now_mono = time.monotonic()
         cutoff_wall = now_wall - _td(seconds=self._VPD_BUFFER_MAX_AGE_S)
         loaded = 0
+        pruned = 0
+        errors = 0
         for entry in raw:
             try:
                 at_str = entry.get("at", "")
                 vpd = float(entry.get("vpd_kpa", 0))
                 at_dt = _dt.fromisoformat(at_str.replace("Z", "+00:00"))
                 if at_dt < cutoff_wall:
+                    pruned += 1
                     continue  # too old
                 # Convert wall-clock → monotonic offset from now
                 delta_s = (now_wall - at_dt).total_seconds()
                 mono_ts = now_mono - delta_s
                 self._vpd_samples.append((mono_ts, vpd))
                 loaded += 1
-            except Exception:
+            except Exception as e:
+                errors += 1
+                _LOGGER.warning("📊 VPD hydrate: error parsing entry %s: %s", entry, e)
                 continue
-        if loaded:
-            _LOGGER.info(
-                "📊 VPD buffer hydrated: %d sample(s) from store (24h window)",
-                loaded,
-            )
+        _LOGGER.info(
+            "📊 VPD buffer hydrated: %d loaded, %d pruned (>24h), %d errors, buffer now has %d samples",
+            loaded, pruned, errors, len(self._vpd_samples),
+        )
 
     @property
     def vpd_24h_average(self) -> Optional[float]:
