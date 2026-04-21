@@ -2,6 +2,36 @@
 
 All notable changes to the Z2M Irrigation integration will be documented in this file.
 
+## [4.1.1] - 2026-04-22
+
+### 📝 Session log clarity — rename "Delivered" → "Software computed"
+
+The session log's **Delivered** column historically implied it was the
+authoritative volume delivered to the zone. In reality the column shows
+the integration's own flow-integrated total, computed by accumulating
+`flow_lpm × dt` from MQTT state publishes. The device's hardware
+`cyclic_quantitative_irrigation` counter is what actually closes the
+valve at target — and when software and hardware disagree (missed MQTT
+publishes, zigbee packet loss, etc.) the hardware figure is more
+accurate.
+
+**Dashboard change (`dashboards/z2m_irrigation.yaml`)**:
+- Column header renamed **Delivered → Software computed**.
+- Paragraph above the table clarified to explain this is flow-integrated
+  telemetry, not the authoritative closed-at value.
+
+No behavioural change to the integration itself — this is label-only.
+
+### 🐛 VPD buffer persistence + diagnostic logging
+
+- Fix in `zone_store.py`: the `async_load()` normaliser was not
+  including the `vpd_buffer` key in its returned dict, so the 24h VPD
+  buffer failed to hydrate across restarts even when it was correctly
+  written to disk.
+- Additional `_LOGGER.info` lines in `manager._hydrate_vpd_buffer()` to
+  make it visible in logs how many entries were loaded, pruned (>24h
+  old), or errored at each HA startup.
+
 ## [4.0.0rc3] - 2026-04-09
 
 ### 🐛 v4.0 release candidate 3 — UX gaps from the live soak

@@ -174,6 +174,7 @@ class ZoneStore:
                 "schedules": raw.get("schedules", []) or [],
                 "history": raw.get("history", {}) or {},
                 "daily_summary": raw.get("daily_summary"),  # may be None
+                "vpd_buffer": raw.get("vpd_buffer"),        # may be None
             }
             _LOGGER.info(
                 "📁 ZoneStore loaded: %d zone(s), %d schedule(s)",
