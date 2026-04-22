@@ -1,256 +1,157 @@
-# Z2M Irrigation Controller v3.0.6
+# Z2M Irrigation (Sonoff Valves)
 
-**100% Local Smart Irrigation System for Home Assistant** ✅ Complete Tracking
+A full irrigation stack for Home Assistant built around Sonoff SWV Zigbee valves
+exposed via Zigbee2MQTT. Includes a VPD-driven calculator, a local scheduler
+with sun-relative times, a single-valve-at-a-time queue runner, multi-layer
+safety guardrails, per-zone trend charts, and a self-contained dashboard with
+two bundled custom Lovelace cards.
 
-> **Latest Update (Nov 5, 2025):** Fixed Last Session Start sensor timezone issue - now displays correctly with proper timezone information
+Local-first. No cloud services, no external databases.
 
-Control Zigbee2MQTT irrigation valves (Sonoff, GiEX, etc.) with complete local persistence, time-based tracking, and zero cloud dependencies.
+## Status
 
----
+- Current version: **4.1.1** (see [CHANGELOG.md](CHANGELOG.md))
+- Minimum Home Assistant: **2024.1.0**
+- Tested on HA OS with MQTT + Zigbee2MQTT addons, 4 Sonoff SWV valves
 
-## ✨ Features
+## What you get
 
-### Core Irrigation (All Working!)
-- ✅ **Automatic valve discovery** via MQTT
-- ✅ **Flow monitoring** with live L/min tracking
-- ✅ **Smart watering** by liters or minutes
-- ✅ **Session tracking** - every irrigation session logged
-- ✅ **Lifetime totals** - never reset, tracks forever
-- ✅ **Resettable totals** - reset anytime for billing periods
-- ✅ **100% local persistence** - SQLite database
-- ✅ **Universal tracking** - monitors all valve activity regardless of trigger source
+**Integration** (`custom_components/z2m_irrigation/`)
 
-### NEW in v3.0.0: Time-Based Tracking ⭐
-- 📊 **Last 24 hours** - liters & runtime
-- 📊 **Last 7 days** - liters & runtime
-- 📊 **Rolling windows** - auto-update after every session
-- 📊 **Perfect for alerts** - high usage detection
-- 📊 **Weekly reports** - automated summaries
+- Auto-discovers Sonoff SWV valves from MQTT and creates a device per valve
+- Per-valve sensors: flow rate, session volume, session duration, 24h/7d
+  usage, zone config (factor / l_per_mm / base_mm), last-run summary, daily
+  history (90-day rolling)
+- Global sensors: calculator output (per-zone litre targets), next-run
+  summary, week summary, schedule history, session log, daily totals
+- Binary sensors: any-valve-running, panic, per-valve in-smart-cycle
+- Services: `start_timed`, `start_liters`, `run_smart_now`, `create_schedule`,
+  `update_schedule`, `delete_schedule`, `set_zone_factor`, `set_zone_l_per_mm`,
+  `set_zone_base_mm`, `set_zone_in_smart_cycle`, `skip_today`,
+  `clear_skip_today`, `reset_totals`, `rescan`
 
-### 17 Sensors Per Valve
-- Real-time: flow, session used, session duration, remaining time/liters
-- Resettable: total liters, total minutes, session count
-- Lifetime: total liters, total minutes, session count
-- **NEW:** Last 24h liters, last 24h minutes, last 7d liters, last 7d minutes
-- Device: battery level, Zigbee link quality
+**Dashboard** (`dashboards/z2m_irrigation.yaml`)
 
-### Services
-- `z2m_irrigation.start_liters` - Water by volume
-- `z2m_irrigation.start_timed` - Water by duration
-- `z2m_irrigation.reset_totals` - Reset resettable totals (lifetime preserved)
-- `z2m_irrigation.rescan` - Re-discover valves
+- Hero tile (running / scheduled / idle state)
+- Per-zone tiles with last-run + 24h/7d usage + in-smart-cycle toggle
+- Setup tab: editable per-zone factor / l_per_mm / base_mm + plant demand
+  reference table
+- Schedule tab: custom editor card (create / edit / delete, fixed or
+  sun-relative times, smart or per-zone fixed-liters modes)
+- Log tab: 200-entry session log (target vs software-computed volume, flow
+  rate, trigger type, OK/panic flag)
+- Trends tab: 7-day per-zone volume charts
 
----
+**Custom Lovelace cards** (`custom_components/z2m_irrigation/www/`)
 
-## 🚀 Quick Start
+- `z2m-irrigation-embed-card` — compact running / scheduled / idle tile
+- `z2m-irrigation-schedule-editor-card` — full schedule editor
 
-### 1. Installation
-Copy `custom_components/z2m_irrigation` to your Home Assistant config folder and restart.
+## How the calculator works
 
-### 2. Configuration
-1. Go to **Settings → Devices & Services → Add Integration**
-2. Search for **"Z2M Irrigation"**
-3. Configure base topic (default: `zigbee2mqtt`)
+For each zone enrolled in smart mode:
 
-### 3. That's It!
-- ✅ Valves auto-discovered
-- ✅ Database created at `/config/z2m_irrigation.db`
-- ✅ All sensors created
-- ✅ Ready to water!
-
----
-
-## 💧 Usage Examples
-
-### Water by Volume
-```yaml
-service: z2m_irrigation.start_liters
-data:
-  valve: "Front Garden"
-  liters: 50
+```
+dryness  = clamp(0.85 + vpd_kpa / 3, 0.8, 1.5)
+need_mm  = max(0, base_mm * dryness - rain_today - 0.7 * forecast_24h_mm)
+liters   = need_mm * zone_factor * zone_l_per_mm
 ```
 
-### Automation - Daily Watering
-```yaml
-automation:
-  - alias: "Water Front Garden Daily"
-    trigger:
-      - platform: time
-        at: "06:00:00"
-    action:
-      - service: z2m_irrigation.start_liters
-        data:
-          valve: "Front Garden"
-          liters: 50
-```
+- `vpd_kpa` is the 24-hour rolling average of VPD read from your weather
+  sensor (Ecowitt hPa or native kPa — the adapter normalises)
+- `rain_today` and `forecast_24h_mm` come from your weather provider
+- `base_mm` is the per-zone "what a healthy week would want per day" target
+- `zone_factor` lets you bias a zone up or down without touching base_mm
+- `zone_l_per_mm` is the zone's area calibration (litres to deliver one mm of
+  depth across the zone's footprint)
 
-### Alert - High Usage
-```yaml
-automation:
-  - alias: "Alert: High Daily Usage"
-    trigger:
-      - platform: numeric_state
-        entity_id: sensor.water_valve_1_last_24h
-        above: 100
-    action:
-      - service: notify.mobile_app
-        data:
-          message: "High water usage: {{ trigger.to_state.state }}L in 24h"
-```
+The scheduler fires at a schedule's time, collects currently-enrolled zones,
+hands their target litres to the queue runner, and waters one zone at a time
+with a 5-second inter-zone gap. The Sonoff SWV's hardware
+`cyclic_quantitative_irrigation` counter is what actually closes each valve at
+target — the integration's software-side flow integration is telemetry only.
 
----
+## Safety layers
 
-## 📊 Dashboard Example
+1. Device hardware quantitative counter (primary close, ~2.5% accurate)
+2. Software 140% overshoot guardrail (force-off at 1.4× target)
+3. Software stuck-flow guardrail (force-off after 10 min of no litre progress)
+4. Software MQTT-silence guardrail (force-off after 5 min with no state publish)
+5. Panic system (fires `EVENT_PANIC_REQUIRED` + persistent notification +
+   optional `kill_switch_entity` pump cut)
 
-```yaml
-type: entities
-title: Irrigation
-entities:
-  - entity: sensor.water_valve_1_flow
-    name: Flow Rate
-  - entity: sensor.water_valve_1_last_24h
-    name: Last 24 Hours
-  - entity: sensor.water_valve_1_last_7_days
-    name: Last Week
-  - entity: sensor.water_valve_1_lifetime_total
-    name: Lifetime Total
-```
+## Install
 
----
+### Via HACS (recommended)
 
-## 🗄️ Database & Persistence
+1. HACS → Integrations → three-dot menu → **Custom repositories**
+2. Add `https://github.com/Zebra-zzz/z2m-irrigation` as an Integration
+3. Find *Z2M Irrigation (Sonoff Valves)* in HACS, download, restart Home Assistant
+4. Settings → Devices & Services → **Add Integration** → search *Z2M Irrigation*
 
-### Local SQLite
-- **Location:** `/config/z2m_irrigation.db`
-- **Backup:** Included in HA backups automatically
-- **No cloud:** 100% local, no internet required
+### Manual
 
-### What's Stored
-- All irrigation sessions (start, end, duration, volume)
-- Lifetime totals (never reset)
-- Resettable totals (manual reset)
-- Time-based metrics (24h, 7d rolling windows)
+1. Download the latest release from the [releases page](https://github.com/Zebra-zzz/z2m-irrigation/releases)
+2. Extract `custom_components/z2m_irrigation/` into `/config/custom_components/`
+3. Restart Home Assistant, then add the integration as above
 
----
+## Dashboard install
 
-## 📋 Logging
+The dashboard lives in [dashboards/z2m_irrigation.yaml](dashboards/z2m_irrigation.yaml).
+See [dashboards/README.md](dashboards/README.md) for the install steps
+(storage-mode deploy + browser hard-refresh).
 
-Add to `configuration.yaml`:
-```yaml
-logger:
-  logs:
-    custom_components.z2m_irrigation: debug
-```
+## Requirements
 
-View logs:
-```
-Settings → System → Logs → Dropdown → "custom_components.z2m_irrigation"
-```
+- Home Assistant 2024.1.0+
+- MQTT integration configured
+- Zigbee2MQTT running with Sonoff SWV valves paired
+- A weather integration that exposes VPD and daily-rain sensors (Ecowitt,
+  native HA weather forecast, or similar)
 
-See `LOGGING-SETUP.md` for complete guide.
+## Data and persistence
 
----
+- **SQLite**: `/config/z2m_irrigation.db` — session history, append-mostly
+  time-series of every valve run. 90-day retention, 200 rows on the dashboard.
+- **JSON store**: `/config/.storage/z2m_irrigation.<entry_id>` — mutable zone
+  config, schedules, daily summary cache, VPD 24h rolling buffer.
+- Both are included in standard HA backups.
 
-## 📚 Documentation
+## Troubleshooting
 
-- **`V3-SUMMARY.md`** - Complete overview
-- **`LOCAL-PERSISTENCE-GUIDE.md`** - Database details & examples
-- **`LOGGING-SETUP.md`** - Logging configuration
-- **`SCHEDULER-STATUS.md`** - Scheduler information
-- **`TROUBLESHOOTING.md`** - Common issues
-- **`CHANGELOG.md`** - Version history
+**Valves not discovered** — confirm Z2M is publishing to
+`zigbee2mqtt/<friendly_name>` and that the integration's MQTT base topic
+matches (default `zigbee2mqtt`, editable in the integration options).
 
----
+**Calculator output is zero / unknown** — check that your VPD sensor reports a
+numeric state and that the weather adapter is reading it. Logs show
+`weather: sensor.<name> <value> <unit> → <kPa>` at DEBUG when a sample comes
+through.
 
-## ⏸️ Scheduler Status
+**Session delivered less than target** — expected on valves whose hardware
+flow counter disagrees with the software flow integration. The device's
+quantitative counter is the authoritative stop signal. The dashboard's
+*Software computed* column is telemetry, not truth.
 
-Built-in scheduler **temporarily disabled** in v3.0.0 pending local database migration.
+**Session shows 0 L and cut off after ~10 min** — the stuck-flow guardrail
+fired. Usually means no water was actually reaching the valve (empty tank,
+pump not primed, closed upstream valve).
 
-**Workaround:** Use Home Assistant automations (see examples above)
+**VPD buffer empty after restart** — as of v4.1.1 the hydration path is fixed
+and logs `VPD buffer hydrated: N loaded, M pruned` on startup. If you still
+see zero loaded, check that `/config/.storage/z2m_irrigation.<entry_id>` has a
+`vpd_buffer` key under `data`.
 
-**Coming:** v3.1.0 with full local scheduler
+For anything else, open an issue with your HA version, integration version,
+logs filtered for `z2m_irrigation`, and a brief description of what you
+expected vs observed.
 
-See `SCHEDULER-STATUS.md` for details.
+## Links
 
----
+- [CHANGELOG.md](CHANGELOG.md) — full version history
+- [dashboards/README.md](dashboards/README.md) — dashboard install
+- [Issues](https://github.com/Zebra-zzz/z2m-irrigation/issues)
 
-## 🎯 What's New in v3.0.0
+## License
 
-### Added
-- ✅ 100% local SQLite persistence
-- ✅ 4 time-based sensors per valve (24h, 7d)
-- ✅ Universal session tracking
-- ✅ Auto-cleanup of old sessions
-- ✅ Emoji-decorated debug logs
-
-### Removed
-- ❌ Supabase cloud dependency
-- ❌ .env file requirement
-- ❌ Internet dependency
-- ⏸️ Scheduler (temporarily - use automations)
-
----
-
-## 🆘 Troubleshooting
-
-### Integration Won't Load
-Check logs: `Settings → System → Logs → "z2m_irrigation"`
-
-### Valves Not Discovered
-1. Verify MQTT base topic
-2. Check Zigbee2MQTT pairing
-3. Use "Manual Topics" if needed
-
-### Sensors Showing 0 After Restart
-1. Check `/config/z2m_irrigation.db` exists
-2. Check logs for "Database initialized"
-3. Restart integration
-
-See `TROUBLESHOOTING.md` for complete guide.
-
----
-
-## 📊 Sensor Reference
-
-### Per Valve (17 Total)
-- **Real-time:** flow, session used, duration, remaining
-- **Resettable:** total liters, minutes, count
-- **Lifetime:** total liters, minutes, count (never reset)
-- **Time-based (NEW):** last 24h, last 7d (liters & minutes)
-- **Device:** battery, link quality
-
----
-
-## ⚙️ Services
-
-### `start_liters`
-Water by volume target (auto-stops at target)
-
-### `start_timed`
-Water for duration (stops after time elapsed)
-
-### `reset_totals`
-Reset resettable totals (lifetime preserved)
-
-### `rescan`
-Re-discover valves from MQTT
-
----
-
-## 🤝 Contributing
-
-Issues and PRs welcome!
-
-**GitHub:** https://github.com/Zebra-zzz/z2m-irrigation
-
----
-
-## 📝 License
-
-MIT License
-
----
-
-**Happy Watering!** 💧🌱
-
-For complete documentation, see the included `.md` files.
+MIT — see [LICENSE](LICENSE).

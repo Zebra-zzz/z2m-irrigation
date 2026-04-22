@@ -1,35 +1,36 @@
 # Z2M Irrigation (Sonoff Valves)
 
-Control and log Sonoff Zigbee water valves via Zigbee2MQTT with comprehensive session history tracking.
+A full irrigation stack for Home Assistant built around Sonoff SWV Zigbee
+valves exposed via Zigbee2MQTT. Local-first, no cloud services.
 
-## Features
+## What it does
 
-- **100% UI Configuration** - No YAML required
-- **Multi-Valve Support** - Manage multiple valves from one integration
-- **Real-Time Flow Monitoring** - Track water flow in L/min
-- **Volume Tracking** - Precise litre integration with persistent totals
-- **Smart Control Modes**:
-  - Timed (auto-off after X minutes)
-  - Volume (auto-off after X litres)
-  - Manual (direct on/off)
-- **GUI Session History** - Dedicated panel with filtering and CSV export
-- **Automation Services** - Full HA automation support
-- **Failsafe Protection** - Automatic retry and max runtime limits
+- Auto-discovers Sonoff SWV valves over MQTT
+- VPD-driven calculator computes per-zone litre targets from weather + rain
+- Local scheduler with fixed and sun-relative times (sunrise/sunset ±N min)
+- Single-valve-at-a-time queue runner with 5-second inter-zone gap
+- Multi-layer safety: hardware quantitative close + software overshoot,
+  stuck-flow, MQTT-silence, and panic guardrails
+- Bundled dashboard (Hero / Setup / Schedule / Log / Trends tabs) and two
+  custom Lovelace cards
+- SQLite session history (90-day retention) + JSON config store, both in HA
+  backups
 
-## Quick Start
+## Quick start
 
-1. Install via HACS
-2. Restart Home Assistant
-3. Add integration: Settings → Devices & Services → Add Integration
-4. Search for "Z2M Irrigation"
-5. Configure your first valve
+1. Install via HACS, restart Home Assistant
+2. Settings → Devices & Services → **Add Integration** → *Z2M Irrigation*
+3. Deploy the bundled dashboard from `dashboards/z2m_irrigation.yaml`
+4. Open the Setup tab, tune `factor` / `l_per_mm` / `base_mm` per zone
+5. Open the Schedule tab, add a schedule, enrol zones into smart mode
 
 ## Requirements
 
 - Home Assistant 2024.1.0+
 - MQTT integration configured
-- Zigbee2MQTT with Sonoff water valves
+- Zigbee2MQTT with Sonoff SWV valves paired
+- A weather integration exposing VPD and daily rain
 
 ## Documentation
 
-Full documentation available in the [README](https://github.com/YOUR_USERNAME/ha-z2m-irrigation)
+Full documentation: [https://github.com/Zebra-zzz/z2m-irrigation](https://github.com/Zebra-zzz/z2m-irrigation)
